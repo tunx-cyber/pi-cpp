@@ -23,6 +23,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/nlohmann/json.git
   GIT_TAG        v3.11.3
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
 )
 
 # 声明 openai-cpp（HTTP/SSE 传输实现，同样使用浅克隆）
@@ -31,6 +32,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/ItsJustMeChris/openai-cpp.git
   GIT_TAG        1.0.0
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
 )
 
 # 声明 valijson（工具参数 JSON Schema 校验，header-only）
@@ -39,6 +41,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/tristanpenman/valijson.git
   GIT_TAG        v1.0.3
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
 )
 
 # 声明 stb（图片解码/缩放，header-only）
@@ -47,6 +50,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/nothings/stb.git
   GIT_TAG        master
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
 )
 
 # 声明 googletest（单元测试框架）
@@ -55,6 +59,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/google/googletest.git
   GIT_TAG        v1.14.0
   GIT_SHALLOW    TRUE
+  GIT_PROGRESS   TRUE
 )
 
 # 查找系统 libcurl（openai-cpp 依赖）
@@ -66,6 +71,17 @@ FetchContent_MakeAvailable(openai-cpp)
 FetchContent_MakeAvailable(valijson)
 FetchContent_MakeAvailable(stb)
 FetchContent_MakeAvailable(googletest)
+
+# ── 清理 .git 目录以节省空间 ──
+# shallow clone 虽然只拉一个 commit，但 pack 文件仍包含仓库所有文件的完整快照。
+# nlohmann/json: .git/pack 达 177M，实际只需 include/ (996K)。
+# valijson:       .git 达  18M，header-only 库实际只需 ~2M。
+foreach(DEP nlohmann_json openai-cpp valijson stb googletest)
+  if(EXISTS "${${DEP}_SOURCE_DIR}/.git")
+    file(REMOVE_RECURSE "${${DEP}_SOURCE_DIR}/.git")
+    message(STATUS "已删除 ${DEP} 的 .git 目录（节省空间）")
+  endif()
+endforeach()
 
 # openai-cpp 1.0.0 的 webhooks.hpp 使用 std::variant，但发布包未始终显式包含
 # <variant>。libc++ 常通过传递包含掩盖该问题，GCC/libstdc++ 会直接报错。
