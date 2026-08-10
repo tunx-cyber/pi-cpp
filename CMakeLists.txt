@@ -110,6 +110,7 @@ add_executable(pi_repl
   apps/repl/main.cpp
   src/app/settings.cpp
   src/app/images.cpp
+  src/app/memory_monitor.cpp
   src/app/commands.cpp
   src/app/repl.cpp
   src/app/agent_session.cpp
@@ -131,7 +132,11 @@ set(PI_TEST_SOURCES
   tests/harness/skills_test.cpp
   tests/harness/templates_test.cpp
   tests/app/settings_test.cpp
+  tests/app/commands_test.cpp
+  tests/app/memory_monitor_test.cpp
   src/app/settings.cpp
+  src/app/commands.cpp
+  src/app/memory_monitor.cpp
 )
 
 add_executable(pi_tests ${PI_TEST_SOURCES})

@@ -52,7 +52,7 @@ include/pi/
 │             AgentHarness（消息持久化 + 自动压缩 + 模型/thinking 恢复）
 │             env（POSIX FileSystem + Shell，abort 感知）
 └── app/      settings（按 cwd 持久化）、images（stb ≤2000px resize + base64）
-              commands（slash + 编码工具）、repl（raw mode + 事件泵 + 状态栏）
+              commands（slash + 编码工具）、repl（raw mode + 事件泵 + 状态栏 + 进程内存监控）
 ```
 
 并发模型：阻塞 + 线程池。agent 循环单线程阻塞执行；工具批次每调用一个线程（上限 8）；子 agent 在父工具线程内联（不跳线程）。事件只在 run 线程派发，经 mutex+pipe 送到 UI 线程。

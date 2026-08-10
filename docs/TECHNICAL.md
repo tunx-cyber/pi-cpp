@@ -253,8 +253,8 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 - 行编辑：逐字符回显、Backspace、左右方向键、Ctrl+L 重绘。
 - 流式快捷键：Enter=steer（整行入队）、Esc=abort、Ctrl+C=退出（二次确认）。
 - 空闲快捷键：Ctrl+P=循环切换模型（flash↔pro）、Ctrl+C=退出。
-- 状态栏：`[model=..] [thinking=..] [cost=$..]`（cost 与 `calculate_cost` 同源）。
-- slash 命令：/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /quit + 用户模板（`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`）。
+- 状态栏：`[model=..] [thinking=..] [cost=$..] [mem rss=.. vms=.. peak_rss=..]`（cost 与 `calculate_cost` 同源）。内存指标针对实际运行的 `pi_repl` 进程；Linux 读取 `/proc/self/status` 的 `VmRSS`/`VmSize`，macOS 使用 `task_info`。
+- slash 命令：/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /memory /quit + 用户模板（`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`）。
 - 管道模式（非 TTY 或带参数）：`pi_repl "prompt" [--image path]`，订阅事件流式打印 + usage 行。
 
 ## 6. 并发模型

@@ -28,13 +28,20 @@ constexpr const char* kBanner =
     "pi-cpp — C++ terminal agent (pi 移植版)\n"
     "输入 /help 查看命令。流式中：Enter=steer Esc=abort Ctrl+C=退出\n";
 
-std::string status_text(const AgentSession& session)
+std::string status_text(const AgentSession& session, const ProcessMemoryUsage& memory,
+                        const ProcessMemoryUsage& peak_memory)
 {
     const ModelInfo model = session.model();
     std::string thinking = to_string(session.thinking_level());
     std::string out = "[model=" + model.id + "] [thinking=" + thinking + "]";
     out += " [turn=$" + std::to_string(session.total_cost()) + "]";
     out += " [all=$" + std::to_string(session.all_time_cost()) + "]";
+    out += " [mem " + format_process_memory(memory);
+    if (peak_memory.hasResident)
+    {
+        out += " peak_rss=" + format_memory_bytes(peak_memory.residentBytes);
+    }
+    out += "]";
     return out;
 }
 
@@ -132,6 +139,21 @@ Repl::Repl(AgentSession& session, std::string cwd)
                 }
                 enqueue(UiEvent{UiEvent::Type::ToolEnd, "", event.toolName, "", std::move(detail)});
             }
+            if (event.type == AgentEvent::Type::MessageEnd && event.message.role == Role::Assistant)
+            {
+                if (event.message.stopReason == StopReason::Error)
+                {
+                    const std::string message = event.message.errorMessage.empty()
+                                                    ? "AI request failed"
+                                                    : event.message.errorMessage;
+                    enqueue(UiEvent{UiEvent::Type::Delta, "\r\n[error] " + message + "\n", "", "",
+                                    ""});
+                }
+                else if (event.message.stopReason == StopReason::Aborted)
+                {
+                    enqueue(UiEvent{UiEvent::Type::Delta, "\r\n[aborted]\n", "", "", ""});
+                }
+            }
             if (event.type == AgentEvent::Type::AgentEnd)
             {
                 enqueue(UiEvent{UiEvent::Type::RunEnd, "", "", "", ""});
@@ -164,11 +186,17 @@ int Repl::run()
         struct pollfd fds[2];
         fds[0] = {STDIN_FILENO, POLLIN, 0};
         fds[1] = {event_pipe_[0], POLLIN, 0};
-        const int ready = poll(fds, 2, -1);
+        // 定期唤醒以刷新空闲提示符中的本进程内存快照。
+        const int ready = poll(fds, 2, 1000);
         if (ready < 0)
         {
             if (errno == EINTR) continue;
             break;
+        }
+        if (ready == 0)
+        {
+            if (!streaming_) draw_prompt();
+            continue;
         }
         if (fds[1].revents & POLLIN)
         {
@@ -194,6 +222,29 @@ int Repl::run()
 
 void Repl::print_banner() { std::cout << kBanner << std::endl; }
 
+ProcessMemoryUsage Repl::sample_memory()
+{
+    const ProcessMemoryUsage current = sample_process_memory();
+    if (current.hasResident &&
+        (!peak_memory_.hasResident || current.residentBytes > peak_memory_.residentBytes))
+    {
+        peak_memory_.residentBytes = current.residentBytes;
+        peak_memory_.hasResident = true;
+    }
+    if (current.hasVirtual &&
+        (!peak_memory_.hasVirtual || current.virtualBytes > peak_memory_.virtualBytes))
+    {
+        peak_memory_.virtualBytes = current.virtualBytes;
+        peak_memory_.hasVirtual = true;
+    }
+    return current;
+}
+
+void Repl::print_status()
+{
+    std::cout << status_text(session_, sample_memory(), peak_memory_) << std::endl;
+}
+
 void Repl::enter_raw_mode()
 {
     struct termios raw;
@@ -215,7 +266,8 @@ void Repl::restore_raw_mode()
 
 void Repl::draw_prompt()
 {
-    std::cout << "\r\033[2K" << "pi> " << line_buffer_;
+    const ProcessMemoryUsage memory = sample_memory();
+    std::cout << "\r\033[2K[mem " << format_process_memory(memory) << "] pi> " << line_buffer_;
     if (cursor_ < line_buffer_.size())
     {
         std::cout << "\033[" << (line_buffer_.size() - cursor_) << "D";
@@ -518,6 +570,21 @@ void Repl::handle_command(const std::string& line)
         }
         return;
     }
+    if (name == "memory")
+    {
+        const ProcessMemoryUsage current = sample_memory();
+        std::cout << "Memory: " << format_process_memory(current);
+        if (peak_memory_.hasResident)
+        {
+            std::cout << " peak_rss=" << format_memory_bytes(peak_memory_.residentBytes);
+        }
+        if (peak_memory_.hasVirtual)
+        {
+            std::cout << " peak_vms=" << format_memory_bytes(peak_memory_.virtualBytes);
+        }
+        std::cout << std::endl;
+        return;
+    }
     if (name == "quit")
     {
         quit_requested_ = true;
@@ -576,6 +643,7 @@ std::string Repl::help_text()
            "  /image <path> 图片输入\n"
            "  /tools       启用编码工具（read/bash/edit/write/grep/find/ls）\n"
            "  /skills      列出 skills\n"
+           "  /memory      显示 pi_repl 进程当前及峰值内存\n"
            "  /quit        退出\n"
            "用户模板：~/.pi-cpp/templates/<name>.md → /<name> 参数\n"
            "流式中：Enter=steer Esc=abort Ctrl+C=退出（确认）Ctrl+P=切模型 Ctrl+L=重绘\n";
@@ -718,7 +786,7 @@ void Repl::drain_events()
                     std::cout << "\r\n" << format_usage_line(session_.last_turn_usage())
                               << std::endl;
                 }
-                std::cout << status_text(session_) << std::endl;
+                print_status();
                 break;
             case UiEvent::Type::Status:
                 std::cout << event.statusLine << std::endl;

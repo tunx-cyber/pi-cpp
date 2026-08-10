@@ -201,6 +201,20 @@ TEST(AgentLoopTest, UnknownToolProducesNotFoundError)
     EXPECT_TRUE(messages[2].isError);
 }
 
+TEST(AgentLoopTest, ToolNamesAreCaseInsensitive)
+{
+    LoopHarness harness({make_tool("bash")});
+    harness.transport->add_turn(
+        tool_turn({tool_call_block("call_1", "Bash", Json{{"command", "ls"}})}));
+    harness.transport->add_turn(text_turn("ok"));
+
+    harness.run({Message::user("go")});
+
+    ASSERT_GE(harness.context.messages.size(), 3u);
+    EXPECT_FALSE(harness.context.messages[2].isError);
+    EXPECT_EQ(harness.context.messages[2].text_content(), "bash executed: ls");
+}
+
 TEST(AgentLoopTest, InvalidArgsFailSchemaValidation)
 {
     AgentTool tool = make_tool("bash");

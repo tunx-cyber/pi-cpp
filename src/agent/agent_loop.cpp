@@ -3,6 +3,7 @@
 #include <condition_variable>
 
 #include <algorithm>
+#include <cctype>
 #include <mutex>
 #include <thread>
 
@@ -14,6 +15,18 @@ namespace pi
 
 namespace
 {
+
+bool tool_names_equal(const std::string& left, const std::string& right)
+{
+    if (left.size() != right.size()) return false;
+    for (size_t i = 0; i < left.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(left[i])) !=
+            std::tolower(static_cast<unsigned char>(right[i])))
+            return false;
+    }
+    return true;
+}
 
 constexpr int kMaxConcurrentTools = 8;
 
@@ -95,7 +108,7 @@ PreparationResult prepare_tool_call(const AgentContext& context,
     const AgentTool* tool = nullptr;
     for (const auto& t : context.tools)
     {
-        if (t.name == tool_call.name)
+        if (tool_names_equal(t.name, tool_call.name))
         {
             tool = &t;
             break;
@@ -197,7 +210,8 @@ bool has_sequential_tool_call(const std::vector<ContentBlock>& tool_calls,
     {
         for (const auto& tool : context.tools)
         {
-            if (tool.name == call.name && tool.executionMode == ToolExecutionMode::Sequential)
+            if (tool_names_equal(tool.name, call.name) &&
+                tool.executionMode == ToolExecutionMode::Sequential)
                 return true;
         }
     }

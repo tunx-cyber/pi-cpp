@@ -12,6 +12,7 @@
 
 #include "pi/app/agent_session.h"
 #include "pi/app/commands.h"
+#include "pi/app/memory_monitor.h"
 #include "pi/harness/env.h"
 
 namespace pi
@@ -59,6 +60,8 @@ class Repl
     void drain_events();
     void enqueue(UiEvent event);
     void print_banner();
+    void print_status();
+    ProcessMemoryUsage sample_memory();
     std::string help_text();
 
     AgentSession& session_;
@@ -89,6 +92,7 @@ class Repl
     int64_t total_input_tokens_ = 0;
     int64_t total_output_tokens_ = 0;
     double session_cost_ = 0;
+    ProcessMemoryUsage peak_memory_;
 };
 
 }  // namespace pi
