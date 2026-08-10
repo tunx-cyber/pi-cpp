@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <mutex>
+#include <variant>
 #include <openai/client.hpp>
 #include <openai/error.hpp>
 #include <optional>
@@ -541,19 +543,49 @@ class OpenAiCompletionsTransport::Impl
           timeout_(timeout),
           abort_(std::make_shared<std::atomic<bool>>(false))
     {
-        openai::ClientOptions options;
-        options.api_key = apiKey_;
-        options.base_url = baseUrl_;
-        options.timeout = timeout_;
-        options.max_retries = 0;
-        options.use_bearer_auth = true;
-        client_ = std::make_unique<openai::OpenAIClient>(options, make_http_client());
     }
 
     void stream_chat(const ModelInfo& model, const std::vector<Message>& messages,
                      const StreamRequestOptions& opts,
                      const std::function<void(const StreamEvent&)>& sink)
     {
+        // The underlying client and body augmenter are mutable per request.
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        abort_ = opts.abort ? opts.abort : std::make_shared<std::atomic<bool>>(false);
+
+        auto output = make_output(model);
+        sink(StreamEvent{StreamEvent::Type::Start, -1, "", "", {}, StopReason::Stop, output});
+
+        const std::string request_api_key =
+            opts.apiKey && !opts.apiKey->empty() ? *opts.apiKey : apiKey_;
+        if (request_api_key.empty())
+        {
+            output.stopReason = StopReason::Error;
+            output.errorMessage =
+                "Missing API key. Set PI_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY before sending a prompt.";
+            StreamEvent error;
+            error.type = StreamEvent::Type::Error;
+            error.reason = StopReason::Error;
+            error.message = output;
+            sink(error);
+            return;
+        }
+        try
+        {
+            client_ = make_client(request_api_key);
+        }
+        catch (const std::exception& e)
+        {
+            output.stopReason = StopReason::Error;
+            output.errorMessage = e.what();
+            StreamEvent error;
+            error.type = StreamEvent::Type::Error;
+            error.reason = StopReason::Error;
+            error.message = output;
+            sink(error);
+            return;
+        }
+
         const Compat compat = detect_compat(model);
         const std::string systemPrompt = opts.systemPrompt;
         const auto transformed = transform_messages(messages, model);
@@ -636,13 +668,7 @@ class OpenAiCompletionsTransport::Impl
             // openai-cpp 不暴露原始响应头回调；状态码在异常中携带，此处留空
         }
 
-        *abort_ = false;
-        if (opts.abort) abort_ = opts.abort;
-
-        auto output = make_output(model);
         StreamContext ctx{output, sink, model};
-
-        sink(StreamEvent{StreamEvent::Type::Start, -1, "", "", {}, StopReason::Stop, output});
 
         try
         {
@@ -691,6 +717,17 @@ class OpenAiCompletionsTransport::Impl
     }
 
    private:
+    std::unique_ptr<openai::OpenAIClient> make_client(const std::string& apiKey)
+    {
+        openai::ClientOptions options;
+        options.api_key = apiKey;
+        options.base_url = baseUrl_;
+        options.timeout = timeout_;
+        options.max_retries = 0;
+        options.use_bearer_auth = true;
+        return std::make_unique<openai::OpenAIClient>(options, make_http_client());
+    }
+
     struct StreamContext
     {
         Message& output;
@@ -1074,6 +1111,7 @@ class OpenAiCompletionsTransport::Impl
     std::unique_ptr<openai::OpenAIClient> client_;
     Json augment_config_ = Json::object();
     Json assistant_extras_ = Json::array();
+    std::mutex stream_mutex_;
 };
 
 // 自定义 HttpClient：abort 感知 + body augmenter（在 src 内实现 curl 部分）

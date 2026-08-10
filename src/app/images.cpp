@@ -37,17 +37,7 @@ namespace
 
 constexpr int kMaxDimension = 2000;
 constexpr int64_t kMaxBytes = 5 * 1024 * 1024;  // 5MB
-
-std::string detect_mime(const std::string& path)
-{
-    const size_t dot = path.find_last_of('.');
-    if (dot == std::string::npos) return "image/png";
-    const std::string ext = path.substr(dot + 1);
-    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
-    if (ext == "gif") return "image/gif";
-    if (ext == "webp") return "image/webp";
-    return "image/png";
-}
+constexpr int64_t kMaxInputPixels = 16LL * 1024 * 1024;
 
 }  // namespace
 
@@ -63,6 +53,12 @@ std::optional<ContentBlock> load_image_as_block(const std::string& filePath)
     if (!file) return std::nullopt;
 
     int width = 0, height = 0, channels = 0;
+    if (!stbi_info_from_memory(raw.data(), static_cast<int>(raw.size()), &width, &height,
+                               &channels) ||
+        width <= 0 || height <= 0 || static_cast<int64_t>(width) * height > kMaxInputPixels)
+    {
+        return std::nullopt;
+    }
     unsigned char* decoded = stbi_load_from_memory(raw.data(), static_cast<int>(raw.size()), &width,
                                                    &height, &channels, 4 /* force RGBA */);
     if (!decoded) return std::nullopt;
@@ -83,17 +79,17 @@ std::optional<ContentBlock> load_image_as_block(const std::string& filePath)
                                   out_height, out_width * 4, STBIR_RGBA);
         pixels = output.data();
     }
-    stbi_image_free(decoded);
-
     int png_size = 0;
     unsigned char* png =
         stbi_write_png_to_mem(pixels, out_width * 4, out_width, out_height, 4, &png_size);
+    stbi_image_free(decoded);
     if (!png) return std::nullopt;
 
     ContentBlock block;
     block.type = BlockType::Image;
     block.data = base64_encode(png, static_cast<size_t>(png_size));
-    block.mimeType = detect_mime(filePath);
+    // The bytes above are always re-encoded as PNG.
+    block.mimeType = "image/png";
     STBIW_FREE(png);
     return block;
 }

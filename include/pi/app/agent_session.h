@@ -42,7 +42,7 @@ class AgentSession
 
     std::vector<SessionMetadata> list_sessions() const;
 
-    const std::vector<AgentMessage>& messages() const;
+    std::vector<AgentMessage> messages() const;
     ModelInfo model() const;
     ThinkingLevel thinking_level() const;
     std::string system_prompt() const;

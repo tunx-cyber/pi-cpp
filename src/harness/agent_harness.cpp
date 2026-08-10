@@ -232,9 +232,9 @@ bool AgentHarness::compact(bool force, std::string* errorOut)
     return true;
 }
 
-const std::vector<AgentMessage>& AgentHarness::messages() const { return agent_.messages(); }
+std::vector<AgentMessage> AgentHarness::messages() const { return agent_.messages(); }
 
-const std::vector<AgentTool>& AgentHarness::tools() const { return agent_.tools(); }
+std::vector<AgentTool> AgentHarness::tools() const { return agent_.tools(); }
 
 ModelInfo AgentHarness::model() const { return agent_.model(); }
 

@@ -219,7 +219,7 @@ std::vector<SessionMetadata> AgentSession::list_sessions() const
     return sessions.value;
 }
 
-const std::vector<AgentMessage>& AgentSession::messages() const { return harness_.messages(); }
+std::vector<AgentMessage> AgentSession::messages() const { return harness_.messages(); }
 
 ModelInfo AgentSession::model() const { return harness_.model(); }
 

@@ -144,6 +144,12 @@ Result<void, FileError> PosixFileSystem::write_file(const std::string& path,
         return Result<void, FileError>::err_value(make_file_error(
             FileErrorCode::Unknown, "Failed to write file: " + errno_message(), resolved));
     file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    file.flush();
+    if (!file.good())
+    {
+        return Result<void, FileError>::err_value(make_file_error(
+            FileErrorCode::Unknown, "Failed to write file: " + errno_message(), resolved));
+    }
     return Result<void, FileError>::ok_value();
 }
 
@@ -161,6 +167,12 @@ Result<void, FileError> PosixFileSystem::append_file(const std::string& path,
         return Result<void, FileError>::err_value(make_file_error(
             FileErrorCode::Unknown, "Failed to append file: " + errno_message(), resolved));
     file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    file.flush();
+    if (!file.good())
+    {
+        return Result<void, FileError>::err_value(make_file_error(
+            FileErrorCode::Unknown, "Failed to append file: " + errno_message(), resolved));
+    }
     return Result<void, FileError>::ok_value();
 }
 

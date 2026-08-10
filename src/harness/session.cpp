@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <ctime>
 
+#include <set>
 #include <sstream>
 
 #include "pi/harness/uuid.h"
@@ -509,6 +510,27 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
         {
             return Result<JsonlSessionStorage, SessionError>::err_value(error);
         }
+        if (storage.by_id_.find(entry.id) != storage.by_id_.end())
+        {
+            return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
+                SessionErrorCode::InvalidEntry,
+                "Invalid JSONL session file " + path + ": duplicate entry id " + entry.id));
+        }
+        if (!entry.parentId.empty() && storage.by_id_.find(entry.parentId) == storage.by_id_.end())
+        {
+            return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
+                SessionErrorCode::InvalidEntry, "Invalid JSONL session file " + path + ": line " +
+                                                    std::to_string(i + 1) +
+                                                    " references an unknown parent"));
+        }
+        if (entry.type == SessionTreeEntry::Type::Leaf && !entry.leafTargetId.empty() &&
+            storage.by_id_.find(entry.leafTargetId) == storage.by_id_.end())
+        {
+            return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
+                SessionErrorCode::InvalidEntry, "Invalid JSONL session file " + path + ": line " +
+                                                    std::to_string(i + 1) +
+                                                    " references an unknown leaf target"));
+        }
         storage.entries_.push_back(entry);
         storage.by_id_[entry.id] = storage.entries_.size() - 1;
         if (entry.type == SessionTreeEntry::Type::Label && !entry.label.empty())
@@ -595,6 +617,22 @@ std::string JsonlSessionStorage::create_entry_id() { return generate_entry_id(by
 
 Result<void, SessionError> JsonlSessionStorage::append_entry(SessionTreeEntry entry)
 {
+    if (entry.id.empty() || by_id_.find(entry.id) != by_id_.end())
+    {
+        return Result<void, SessionError>::err_value(
+            session_error(SessionErrorCode::InvalidEntry, "Session entry id is missing or duplicated"));
+    }
+    if (!entry.parentId.empty() && by_id_.find(entry.parentId) == by_id_.end())
+    {
+        return Result<void, SessionError>::err_value(
+            session_error(SessionErrorCode::NotFound, "Parent entry " + entry.parentId + " not found"));
+    }
+    if (entry.type == SessionTreeEntry::Type::Leaf && !entry.leafTargetId.empty() &&
+        by_id_.find(entry.leafTargetId) == by_id_.end())
+    {
+        return Result<void, SessionError>::err_value(session_error(
+            SessionErrorCode::NotFound, "Leaf target entry " + entry.leafTargetId + " not found"));
+    }
     const auto append = fs_->append_file(file_path_, session_entry_to_json(entry).dump() + "\n");
     if (!append.ok)
     {
@@ -658,8 +696,15 @@ Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_pat
     std::vector<SessionTreeEntry> path;
     if (leafId.empty()) return Result<std::vector<SessionTreeEntry>, SessionError>::ok_value(path);
     std::string current = leafId;
+    std::set<std::string> visited;
     while (true)
     {
+        if (!visited.insert(current).second)
+        {
+            return Result<std::vector<SessionTreeEntry>, SessionError>::err_value(
+                session_error(SessionErrorCode::InvalidSession,
+                              "Session tree contains a parent cycle at entry " + current));
+        }
         const auto it = by_id_.find(current);
         if (it == by_id_.end())
         {

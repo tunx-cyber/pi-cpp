@@ -58,8 +58,8 @@ class AgentHarness
     /** 手动压缩（/compact）：force=true 即使未达阈值也压缩。 */
     bool compact(bool force = false, std::string* errorOut = nullptr);
 
-    const std::vector<AgentMessage>& messages() const;
-    const std::vector<AgentTool>& tools() const;
+    std::vector<AgentMessage> messages() const;
+    std::vector<AgentTool> tools() const;
     ModelInfo model() const;
     ThinkingLevel thinking_level() const;
     std::string system_prompt() const;

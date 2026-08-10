@@ -25,6 +25,7 @@ class Repl
 {
    public:
     Repl(AgentSession& session, std::string cwd);
+    ~Repl();
 
     int run();
     void quit() { quit_requested_ = true; }

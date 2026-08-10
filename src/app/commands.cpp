@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 #include "pi/ai/model_registry.h"
@@ -92,6 +93,32 @@ std::string join_lines(const std::vector<std::string>& lines, size_t maxLines)
     return out;
 }
 
+// Resolve tool paths inside the session workspace and follow symlinks before checking containment.
+// This prevents ../ and symlink escapes for the file-oriented tools.
+std::optional<std::string> workspace_path(const std::string& cwd, const std::string& requested,
+                                          bool allow_missing)
+{
+    if (requested.empty()) return std::nullopt;
+    std::error_code ec;
+    const auto base = std::filesystem::weakly_canonical(cwd, ec);
+    if (ec) return std::nullopt;
+    const auto input = std::filesystem::path(requested);
+    const auto candidate = input.is_absolute() ? input : base / input;
+    auto canonical = std::filesystem::weakly_canonical(candidate, ec);
+    if (ec)
+    {
+        if (!allow_missing) return std::nullopt;
+        const auto parent = std::filesystem::weakly_canonical(candidate.parent_path(), ec);
+        if (ec) return std::nullopt;
+        canonical = parent / candidate.filename();
+    }
+    const auto relative = std::filesystem::relative(canonical, base, ec);
+    if (ec || (!relative.empty() &&
+               (relative == std::filesystem::path("..") || relative.begin()->string() == "..")))
+        return std::nullopt;
+    return canonical.string();
+}
+
 }  // namespace
 
 std::vector<AgentTool> make_coding_tools(const std::string& cwd)
@@ -108,8 +135,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
              {"required", Json::array({"path"})}},
         [cwd](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
         {
-            std::string path = args.value("path", "");
-            if (path.empty() || path.front() != '/') path = cwd + "/" + path;
+            const auto resolved = workspace_path(cwd, args.value("path", ""), false);
+            const std::string path = resolved.value_or("");
             ToolResult result;
             const auto info_result = [&]
             {
@@ -154,8 +181,18 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
             ToolResult result;
             PosixShell shell;
             ExecOptions options;
-            options.cwd = args.contains("cwd") ? args["cwd"].get<std::string>() : cwd;
+            const auto working_dir = workspace_path(
+                cwd, args.contains("cwd") ? args["cwd"].get<std::string>() : cwd, false);
+            if (!working_dir || !std::filesystem::is_directory(*working_dir))
+            {
+                result.content.push_back(ContentBlock{});
+                result.content.back().type = BlockType::Text;
+                result.content.back().text = "[bash error] working directory must stay inside the workspace";
+                return result;
+            }
+            options.cwd = *working_dir;
             options.abort = signal;
+            options.timeoutSeconds = 120;
             const auto executed = shell.exec(args.value("command", ""), options);
             std::string text;
             if (!executed.ok)
@@ -186,8 +223,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
              {"required", Json::array({"path", "oldString", "newString"})}},
         [cwd](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
         {
-            std::string path = args.value("path", "");
-            if (path.empty() || path.front() != '/') path = cwd + "/" + path;
+            const auto resolved = workspace_path(cwd, args.value("path", ""), false);
+            const std::string path = resolved.value_or("");
             ToolResult result;
             const std::string content = read_file_text(path);
             const std::string old_string = args.value("oldString", "");
@@ -234,8 +271,16 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
              {"required", Json::array({"path", "content"})}},
         [cwd](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
         {
-            std::string path = args.value("path", "");
-            if (path.empty() || path.front() != '/') path = cwd + "/" + path;
+            const auto resolved = workspace_path(cwd, args.value("path", ""), true);
+            const std::string path = resolved.value_or("");
+            if (path.empty())
+            {
+                ToolResult result;
+                result.content.push_back(ContentBlock{});
+                result.content.back().type = BlockType::Text;
+                result.content.back().text = "Error: path must stay inside the workspace";
+                return result;
+            }
             ToolResult result;
             const std::string dir = path.substr(0, path.find_last_of('/'));
             if (!dir.empty())
@@ -269,8 +314,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
              {"required", Json::array({"pattern"})}},
         [cwd](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
         {
-            std::string path = args.value("path", "");
-            if (path.empty() || path.front() != '/') path = cwd + "/" + path;
+            const auto resolved = workspace_path(cwd, args.value("path", cwd), false);
+            const std::string path = resolved.value_or("");
             const std::string pattern = args.value("pattern", "");
             const int max_results =
                 args.contains("maxResults") ? args["maxResults"].get<int>() : 50;
@@ -354,8 +399,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
              {"required", Json::array()}},
         [cwd](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
         {
-            std::string path = args.value("path", "");
-            if (path.empty() || path.front() != '/') path = cwd + "/" + path;
+            const auto resolved = workspace_path(cwd, args.value("path", cwd), false);
+            const std::string path = resolved.value_or("");
             const int max_results =
                 args.contains("maxResults") ? args["maxResults"].get<int>() : 100;
             ToolResult result;
@@ -397,8 +442,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                        {"required", Json::array()}},
                   [cwd](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
                   {
-                      std::string path = args.value("path", "");
-                      if (path.empty() || path.front() != '/') path = cwd + "/" + path;
+                      const auto resolved = workspace_path(cwd, args.value("path", cwd), false);
+                      const std::string path = resolved.value_or("");
                       ToolResult result;
                       DIR* d = opendir(path.c_str());
                       if (!d)

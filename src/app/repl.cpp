@@ -139,6 +139,15 @@ Repl::Repl(AgentSession& session, std::string cwd)
         });
 }
 
+Repl::~Repl()
+{
+    session_.abort();
+    PosixShell::kill_all_children();
+    if (worker_.joinable()) worker_.join();
+    if (event_pipe_[0] >= 0) close(event_pipe_[0]);
+    if (event_pipe_[1] >= 0) close(event_pipe_[1]);
+}
+
 int Repl::run()
 {
     print_banner();
@@ -176,7 +185,9 @@ int Repl::run()
         }
     }
 
+    session_.abort();
     PosixShell::kill_all_children();
+    if (worker_.joinable()) worker_.join();
     restore_raw_mode();
     return 0;
 }
@@ -243,11 +254,12 @@ void Repl::handle_input()
                     if (read(STDIN_FILENO, &next, 1) == 1 && next == 3)
                     {
                         quit_requested_ = true;
-                        PosixShell::kill_all_children();
-                        restore_raw_mode();
-                        std::cout << "bye" << std::endl;
+                        session_.abort();
                     }
-                    std::cout << "(已取消)" << std::endl;
+                    else
+                    {
+                        std::cout << "(已取消)" << std::endl;
+                    }
                 }
                 break;
             default:

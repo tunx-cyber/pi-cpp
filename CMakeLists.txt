@@ -4,16 +4,18 @@ project(pi_cpp)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 剪贴板图片读取（macOS）需要 Objective-C++ 编译
-enable_language(OBJCXX)
+# 只有 macOS 的剪贴板实现需要 Objective-C++；Linux 构建不应强制依赖该编译器。
+if(APPLE)
+  enable_language(OBJCXX)
+endif()
 
 # 导出 compile_commands.json，供 IDE（VS Code C/C++ 扩展）跟随真实编译配置
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(FetchContent)
 
-# 设置所有 FetchContent 下载的根目录（放在项目源码同级的外部目录）
-set(FETCHCONTENT_BASE_DIR "${CMAKE_SOURCE_DIR}/external")
+# 每个构建目录使用独立依赖树，避免 Make/Ninja 或不同平台共享 CMake 产物。
+set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_deps")
 
 # 声明 nlohmann/json（使用指定 tag + 浅克隆）
 FetchContent_Declare(
@@ -64,6 +66,13 @@ FetchContent_MakeAvailable(openai-cpp)
 FetchContent_MakeAvailable(valijson)
 FetchContent_MakeAvailable(stb)
 FetchContent_MakeAvailable(googletest)
+
+# openai-cpp 1.0.0 的 webhooks.hpp 使用 std::variant，但发布包未始终显式包含
+# <variant>。libc++ 常通过传递包含掩盖该问题，GCC/libstdc++ 会直接报错。
+# 对第三方 target 强制包含标准头，避免修改 FetchContent 生成的 external/ 源码。
+if(TARGET openai-cpp AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(openai-cpp PRIVATE -include variant)
+endif()
 
 # ============ pi_core：ai + agent + harness 静态库 ============
 set(PI_CORE_SOURCES
@@ -121,6 +130,8 @@ set(PI_TEST_SOURCES
   tests/harness/compaction_test.cpp
   tests/harness/skills_test.cpp
   tests/harness/templates_test.cpp
+  tests/app/settings_test.cpp
+  src/app/settings.cpp
 )
 
 add_executable(pi_tests ${PI_TEST_SOURCES})

@@ -64,13 +64,13 @@ std::string Agent::error_message() const
     return error_message_;
 }
 
-const std::vector<AgentMessage>& Agent::messages() const
+std::vector<AgentMessage> Agent::messages() const
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return messages_;
 }
 
-const std::vector<AgentTool>& Agent::tools() const
+std::vector<AgentTool> Agent::tools() const
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return tools_;
@@ -151,7 +151,12 @@ bool Agent::has_queued_messages() const
 
 void Agent::abort()
 {
-    if (abort_) abort_->store(true);
+    std::shared_ptr<std::atomic<bool>> signal;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        signal = abort_;
+    }
+    if (signal) signal->store(true);
 }
 
 bool Agent::is_busy() const
@@ -199,9 +204,12 @@ void Agent::prompt_messages(const std::vector<AgentMessage>& messages)
         [this, prompts = std::move(prompts)](const std::shared_ptr<std::atomic<bool>>& signal)
         {
             AgentContext context;
-            context.systemPrompt = system_prompt_;
-            context.messages = messages_;
-            context.tools = tools_;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                context.systemPrompt = system_prompt_;
+                context.messages = messages_;
+                context.tools = tools_;
+            }
             auto config = make_loop_config(false);
             run_agent_loop(
                 prompts, context, config, [this, &signal](const AgentEvent& event)
@@ -245,9 +253,12 @@ void Agent::continue_run()
         [this](const std::shared_ptr<std::atomic<bool>>& signal)
         {
             AgentContext context;
-            context.systemPrompt = system_prompt_;
-            context.messages = messages_;
-            context.tools = tools_;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                context.systemPrompt = system_prompt_;
+                context.messages = messages_;
+                context.tools = tools_;
+            }
             auto config = make_loop_config(false);
             run_agent_loop_continue(
                 context, config, [this, &signal](const AgentEvent& event)
@@ -258,19 +269,22 @@ void Agent::continue_run()
 AgentLoopConfig Agent::make_loop_config(bool skip_initial_steering_poll)
 {
     AgentLoopConfig config;
-    config.model = model_;
-    config.reasoning = thinking_level_ == ThinkingLevel::Off
-                           ? std::optional<ThinkingLevel>(std::nullopt)
-                           : std::optional<ThinkingLevel>(thinking_level_);
-    config.transport = transport_;
-    config.getApiKey = get_api_key_;
-    config.toolExecution = tool_execution_;
-    config.convertToLlm = convert_to_llm_;
-    config.transformContext = transform_context_;
-    config.beforeToolCall = before_tool_call_;
-    config.afterToolCall = after_tool_call_;
-    config.prepareNextTurn = prepare_next_turn_;
-    config.shouldStopAfterTurn = should_stop_after_turn_;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        config.model = model_;
+        config.reasoning = thinking_level_ == ThinkingLevel::Off
+                               ? std::optional<ThinkingLevel>(std::nullopt)
+                               : std::optional<ThinkingLevel>(thinking_level_);
+        config.transport = transport_;
+        config.getApiKey = get_api_key_;
+        config.toolExecution = tool_execution_;
+        config.convertToLlm = convert_to_llm_;
+        config.transformContext = transform_context_;
+        config.beforeToolCall = before_tool_call_;
+        config.afterToolCall = after_tool_call_;
+        config.prepareNextTurn = prepare_next_turn_;
+        config.shouldStopAfterTurn = should_stop_after_turn_;
+    }
     config.getSteeringMessages =
         [this, skip = skip_initial_steering_poll]() mutable -> std::vector<AgentMessage>
     {
@@ -296,7 +310,10 @@ void Agent::run_with_lifecycle(
         }
         busy_ = true;
     }
-    abort_ = std::make_shared<std::atomic<bool>>(false);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        abort_ = std::make_shared<std::atomic<bool>>(false);
+    }
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -419,7 +436,12 @@ void Agent::process_events(const AgentEvent& event,
     }
 
     // 监听器在 run 线程按订阅顺序同步调用
-    for (const auto& listener : listeners_)
+    std::vector<AgentEventListener> listeners;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        listeners = listeners_;
+    }
+    for (const auto& listener : listeners)
     {
         listener(event, signal);
     }

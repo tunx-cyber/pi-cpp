@@ -25,7 +25,7 @@ echo "hello" | ./build/pi_repl
 ./build/pi_repl "这是什么" --image photo.png
 ```
 
-API key 自动从以下位置读取（优先级从低到高）：`~/.pi-cpp/.env`、项目根 `.env`（`DEEPSEEK_API_KEY`）、环境变量 `DEEPSEEK_API_KEY` / `PI_API_KEY`。端点/模型可用 `PI_BASE_URL` / `PI_MODEL` 覆盖。
+API key 自动从以下位置读取（优先级从低到高）：`~/.pi-cpp/.env`、当前目录向上最近的项目 `.env`（`DEEPSEEK_API_KEY` / `OPENAI_API_KEY`）、环境变量 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `PI_API_KEY`。端点/模型可用 `PI_BASE_URL` / `PI_MODEL` 覆盖。
 
 REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /quit`。
 

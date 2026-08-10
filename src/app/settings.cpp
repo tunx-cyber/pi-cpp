@@ -7,6 +7,11 @@
 #include <map>
 #include <sstream>
 
+#include <cerrno>
+#include <cstdio>
+#include <sys/stat.h>
+#include <unistd.h>
+
 namespace pi
 {
 
@@ -85,6 +90,66 @@ std::map<std::string, std::string> load_env_file(const std::string& path)
     return values;
 }
 
+std::string find_project_env_file()
+{
+    std::error_code ec;
+    auto directory = std::filesystem::current_path(ec);
+    if (ec) return ".env";
+    while (true)
+    {
+        const auto candidate = directory / ".env";
+        if (std::filesystem::is_regular_file(candidate, ec) && !ec) return candidate.string();
+        const auto parent = directory.parent_path();
+        if (parent == directory) break;
+        directory = parent;
+    }
+    return ".env";
+}
+
+bool write_settings_json(const std::string& path, const Json& json)
+{
+    const std::string dir = path.substr(0, path.find_last_of('/'));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return false;
+
+    const std::string temporary = path + ".tmp." + std::to_string(static_cast<long long>(getpid()));
+    {
+        std::ofstream file(temporary, std::ios::out | std::ios::trunc);
+        if (!file) return false;
+        file << json.dump(2) << '\n';
+        file.flush();
+        if (!file.good())
+        {
+            std::remove(temporary.c_str());
+            return false;
+        }
+    }
+    // Settings contain credentials; do not leave a world-readable file behind.
+    if (chmod(temporary.c_str(), 0600) != 0)
+    {
+        std::remove(temporary.c_str());
+        return false;
+    }
+    if (std::rename(temporary.c_str(), path.c_str()) != 0)
+    {
+        std::remove(temporary.c_str());
+        return false;
+    }
+    return chmod(path.c_str(), 0600) == 0;
+}
+
+Json settings_json(const Settings& settings, const Json& by_cwd)
+{
+    Json json = Json::object();
+    if (!settings.apiKey.empty()) json["apiKey"] = settings.apiKey;
+    json["baseUrl"] = settings.baseUrl;
+    json["model"] = settings.model;
+    json["thinking"] = to_string(settings.thinking);
+    json["byCwd"] = by_cwd;
+    return json;
+}
+
 }  // namespace
 
 std::optional<Settings::CwdOverride> Settings::override_for(const std::string& cwd) const
@@ -126,9 +191,10 @@ Settings Settings::load()
                 settings.thinking = *level;
         }
     }
-    // .env 文件（优先级：~/.pi-cpp/.env < 项目根 .env < 环境变量）
+    // .env 文件（优先级：~/.pi-cpp/.env < 当前目录向上最近的项目 .env < 环境变量）。
+    // 从 build/ 目录启动时仍能找到仓库根目录的 .env。
     const auto env_file = load_env_file(expand_home("~/.pi-cpp/.env"));
-    const auto project_env = load_env_file(".env");
+    const auto project_env = load_env_file(find_project_env_file());
     auto get_env_value = [&](const std::string& key) -> std::string
     {
         if (const char* value = std::getenv(key.c_str()); value && *value) return value;
@@ -138,8 +204,10 @@ Settings Settings::load()
     };
     const std::string env_key = get_env_value("PI_API_KEY");
     const std::string deepseek_key = get_env_value("DEEPSEEK_API_KEY");
+    const std::string openai_key = get_env_value("OPENAI_API_KEY");
     if (!env_key.empty()) settings.apiKey = env_key;
     if (settings.apiKey.empty() && !deepseek_key.empty()) settings.apiKey = deepseek_key;
+    if (settings.apiKey.empty() && !openai_key.empty()) settings.apiKey = openai_key;
     // env 覆盖端点与模型（便于切换/测试）
     const std::string env_base = get_env_value("PI_BASE_URL");
     if (!env_base.empty()) settings.baseUrl = env_base;
@@ -151,26 +219,11 @@ Settings Settings::load()
 void Settings::save() const
 {
     const std::string path = expand_home("~/.pi-cpp/settings.json");
-    const std::string dir = path.substr(0, path.find_last_of('/'));
-    std::filesystem::create_directories(dir);
-
-    Json json = Json::object();
-    if (!apiKey.empty()) json["apiKey"] = apiKey;
-    json["baseUrl"] = baseUrl;
-    json["model"] = model;
-    json["thinking"] = to_string(thinking);
-
+    Json by_cwd = Json::object();
     const auto existing = load_json_file(path);
     if (existing && existing->contains("byCwd") && (*existing)["byCwd"].is_object())
-    {
-        json["byCwd"] = (*existing)["byCwd"];
-    }
-    else
-    {
-        json["byCwd"] = Json::object();
-    }
-    std::ofstream file(path);
-    if (file) file << json.dump(2) << std::endl;
+        by_cwd = (*existing)["byCwd"];
+    (void)write_settings_json(path, settings_json(*this, by_cwd));
 }
 
 void Settings::set_override(const std::string& cwd, const std::optional<std::string>& modelOverride,
@@ -208,7 +261,8 @@ void Settings::set_override(const std::string& cwd, const std::optional<std::str
     {
         by_cwd[cwd] = entry;
     }
-    save();
+    const std::string path = expand_home("~/.pi-cpp/settings.json");
+    (void)write_settings_json(path, settings_json(*this, by_cwd));
 }
 
 }  // namespace pi

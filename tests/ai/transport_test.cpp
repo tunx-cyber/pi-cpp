@@ -56,6 +56,25 @@ std::string json_delta(std::string content)
            content + "\"},\"finish_reason\":null}]}";
 }
 
+TEST(OpenAiTransportTest, MissingApiKeyIsReportedAsStreamError)
+{
+    std::shared_ptr<TransportAdapter> transport;
+    EXPECT_NO_THROW(transport = make_openai_completions_transport(
+                        "http://127.0.0.1:1", "", std::chrono::milliseconds(100)));
+    ASSERT_TRUE(transport);
+
+    const auto model = *get_model("deepseek-v4-flash");
+    EventList events;
+    transport->stream_chat(model, {Message::user("hi")}, {},
+                           [&](const StreamEvent& event) { events.push_back(event); });
+
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0].type, StreamEvent::Type::Start);
+    EXPECT_EQ(events[1].type, StreamEvent::Type::Error);
+    EXPECT_EQ(events[1].message.stopReason, StopReason::Error);
+    EXPECT_NE(events[1].message.errorMessage.find("Missing API key"), std::string::npos);
+}
+
 class TransportTest : public ::testing::Test
 {
    protected:

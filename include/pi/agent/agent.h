@@ -7,7 +7,7 @@
 #include <set>
 #include <string>
 #include <vector>
-
+#include <condition_variable>
 #include "pi/agent/agent_loop.h"
 #include "pi/agent/pending_queue.h"
 
@@ -63,8 +63,8 @@ class Agent
     std::set<std::string> pending_tool_calls() const;
     std::string error_message() const;
 
-    const std::vector<AgentMessage>& messages() const;
-    const std::vector<AgentTool>& tools() const;
+    std::vector<AgentMessage> messages() const;
+    std::vector<AgentTool> tools() const;
     std::string system_prompt() const;
     ModelInfo model() const;
     ThinkingLevel thinking_level() const;
