@@ -1,0 +1,22 @@
+# Google C++ Style（clang-format 内置 Google 配置 + 项目微调）
+# 用法：clang-format -i $(find include src tests -name '*.cpp' -o -name '*.hpp')
+Language: Cpp
+BasedOnStyle: Google
+# 缩进 4 空格（覆盖 Google 默认 2 空格）
+IndentWidth: 4
+ContinuationIndentWidth: 4
+# 大括号独立成行（Allman；覆盖 Google 默认的控制语句同行）
+BreakBeforeBraces: Allman
+# Google 官方 80 列；本项目注释含中文且行现状多在 100 内，放宽以减少破坏性重排
+ColumnLimit: 100
+# Google 风格 include 顺序：配对主头 → C 头 → C++ 头 → 其他（项目头、第三方）
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>$'
+    Priority: 1
+  - Regex: '^<c[^>]*>$'
+    Priority: 2
+  - Regex: '^<'
+    Priority: 3
+  - Regex: '.*'
+    Priority: 4
