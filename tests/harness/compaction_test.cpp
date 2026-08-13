@@ -91,6 +91,28 @@ TEST(CompactionTest, FindCutPointKeepsRecentTokens)
     EXPECT_FALSE(cut.isSplitTurn);
 }
 
+TEST(CompactionTest, PrepareCompactionSkipsWhenNoMessagesToSummarize)
+{
+    // 回归：新建会话只有 model_change/thinking_level_change 条目时，
+    // 不应产生空摘要 preparation（否则 /compact 会对空对话发起 LLM 调用）
+    std::vector<SessionTreeEntry> entries;
+    SessionTreeEntry model_change;
+    model_change.type = SessionTreeEntry::Type::ModelChange;
+    model_change.id = "m0";
+    model_change.provider = "deepseek";
+    model_change.modelId = "deepseek-v4-flash";
+    entries.push_back(model_change);
+    SessionTreeEntry thinking_change;
+    thinking_change.type = SessionTreeEntry::Type::ThinkingLevelChange;
+    thinking_change.id = "t0";
+    thinking_change.thinkingLevel = "high";
+    entries.push_back(thinking_change);
+
+    const auto preparation = prepare_compaction(entries, default_compaction_settings());
+    ASSERT_TRUE(preparation.ok);
+    EXPECT_FALSE(preparation.value.has_value());
+}
+
 TEST(CompactionTest, PrepareCompactionSkipsWhenLastIsCompaction)
 {
     std::vector<SessionTreeEntry> entries;
@@ -106,9 +128,9 @@ TEST(CompactionTest, PrepareCompactionSkipsWhenLastIsCompaction)
     EXPECT_FALSE(preparation.value.has_value());
 }
 
-TEST(CompactionTest, PrepareCompactionSplitTurnDetection)
+TEST(CompactionTest, PrepareCompactionNothingToSummarizeWhenCutAtFirstEntry)
 {
-    // 大体积 user 消息 + 后续 assistant → 切点应在 user 之前（不分割回合）
+    // 切点落在第一条消息上：没有可摘要的历史 → 返回空 preparation（不发起 LLM 调用）
     std::vector<SessionTreeEntry> entries;
     entries.push_back(message_entry("u0", Message::user(long_text(20000))));  // 5000 tokens
     AgentMessage assistant;
@@ -124,9 +146,41 @@ TEST(CompactionTest, PrepareCompactionSplitTurnDetection)
 
     const auto preparation = prepare_compaction(entries, settings);
     ASSERT_TRUE(preparation.ok);
+    EXPECT_FALSE(preparation.value.has_value());
+}
+
+TEST(CompactionTest, PrepareCompactionSplitTurnDetection)
+{
+    // 切点落在 assistant 消息上（保留窗口从回合中间截断）→ 检测 split-turn，
+    // turn 前缀（u0）单独摘要，切点前无更早历史。
+    std::vector<SessionTreeEntry> entries;
+    entries.push_back(message_entry("u0", Message::user("big turn start")));
+    AgentMessage big_assistant;
+    big_assistant.role = Role::Assistant;
+    big_assistant.stopReason = StopReason::Stop;
+    big_assistant.content.push_back(ContentBlock{});
+    big_assistant.content.back().type = BlockType::Text;
+    big_assistant.content.back().text = long_text(20000);  // 5000 tokens
+    entries.push_back(message_entry("a0", big_assistant));
+    AgentMessage small_assistant;
+    small_assistant.role = Role::Assistant;
+    small_assistant.stopReason = StopReason::Stop;
+    small_assistant.content.push_back(ContentBlock{});
+    small_assistant.content.back().type = BlockType::Text;
+    small_assistant.content.back().text = "recent";
+    entries.push_back(message_entry("a1", small_assistant));
+
+    CompactionSettings settings = default_compaction_settings();
+    settings.keepRecentTokens = 500;  // 从尾部累积到 a0（5000 tokens）→ 切点在 a0
+
+    const auto preparation = prepare_compaction(entries, settings);
+    ASSERT_TRUE(preparation.ok);
     ASSERT_TRUE(preparation.value.has_value());
-    EXPECT_EQ(preparation.value->firstKeptEntryId, "u0");
+    EXPECT_EQ(preparation.value->firstKeptEntryId, "a0");
+    EXPECT_TRUE(preparation.value->isSplitTurn);
     EXPECT_TRUE(preparation.value->messagesToSummarize.empty());
+    ASSERT_EQ(preparation.value->turnPrefixMessages.size(), 1u);
+    EXPECT_EQ(preparation.value->turnPrefixMessages[0].text_content(), "big turn start");
 }
 
 TEST(CompactionTest, ExtractFileOpsFromMessages)

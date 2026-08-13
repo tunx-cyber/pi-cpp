@@ -492,6 +492,14 @@ Result<std::optional<CompactionPreparation>, CompactionError> prepare_compaction
         }
     }
 
+    // 没有可摘要的消息（例如新建会话只有 model_change/thinking_level_change 条目）：
+    // 返回空 preparation，让调用方报 "Nothing to compact"，而不是对空对话发起 LLM 调用。
+    if (messages_to_summarize.empty() && turn_prefix_messages.empty())
+    {
+        return Result<std::optional<CompactionPreparation>, CompactionError>::ok_value(
+            std::nullopt);
+    }
+
     FileOperations file_ops;
     if (prev_compaction_index >= 0)
     {
