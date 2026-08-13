@@ -69,11 +69,15 @@ FetchContent_MakeAvailable(valijson)
 FetchContent_MakeAvailable(googletest)
 
 
-# openai-cpp 1.0.0 的 webhooks.hpp 使用 std::variant，但发布包未始终显式包含
-# <variant>。libc++ 常通过传递包含掩盖该问题，GCC/libstdc++ 会直接报错。
-# 对第三方 target 强制包含标准头，避免修改 FetchContent 生成的 external/ 源码。
+# openai-cpp 1.0.0 的若干头文件缺失显式 include：webhooks.hpp 用 std::variant，
+# utils/to_file.hpp、audio.hpp、videos.hpp 用 std::uint8_t（缺 <cstdint>）。
+# libc++ 常通过传递包含掩盖该问题，GCC/libstdc++（Ubuntu CI）会直接报错。
+# 对第三方 target 强制包含统一兼容头（见 cmake/openai_cpp_compat.h），
+# 避免修改 FetchContent 生成的 external/ 源码。
+# 注意：必须保持单个 -include 标志——CMake 对带值选项会做去重合并，
+# 写两个 -include 会被拼成一个，第二个值被当作源文件导致编译失败。
 if(TARGET openai-cpp AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(openai-cpp PRIVATE -include variant)
+  target_compile_options(openai-cpp PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/openai_cpp_compat.h)
 endif()
 
 # ============ pi_core：ai + agent + harness 静态库 ============

@@ -15,6 +15,7 @@
 - **环境代理劫持 localhost**：libcurl 不像 curl CLI 默认绕过代理，本机回环请求会被转发给代理；设置 `CURLOPT_NOPROXY=localhost,127.0.0.1`。
 - **stb 在 CMake 4.x 下构建失败**：`FetchContent_MakeAvailable` 自 CMake 3.30/4.x 起要求源码根存在 CMakeLists.txt（旧版静默跳过），stb 上游是纯 header 库导致 configure 报错。最终方案：**stb 改为仓库内 vendored 依赖**（`third_party/stb/`，固定 commit 2c980bb，仅含用到的 3 个头文件），彻底移除 FetchContent 拉取——不再受 CMake 版本影响，也不再每次 configure 联网 fetch（此前 `GIT_TAG master` 在代理不可用时连增量构建都会挂）。
 - **valijson 子模块拖垮从零构建**：valijson 的 populate 会递归克隆 3 个测试子模块（jsoncpp/nlohmann-json/JSON-Schema-Test-Suite），任一传输中断都让 configure 失败；本项目只用其 header，`GIT_SUBMODULES ""` 跳过——从零构建网络传输从 8 次降到 4 次，代理抖动时也能稳定构建。
+- **Ubuntu CI 编译失败（openai-cpp 缺 `<cstdint>`）**：openai-cpp 1.0.0 的 to_file/audio/videos 头文件用 `std::uint8_t` 却未显式包含 `<cstdint>`，libc++ 靠传递包含掩盖、libstdc++ 直接报错；与既有 `<variant>` 问题同类，统一为 `-include cmake/openai_cpp_compat.h` 兼容头（注意 CMake 会合并重复的 `-include` 标志，必须保持单个）。
 
 ### 文档 / 测试
 
