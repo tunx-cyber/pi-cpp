@@ -621,7 +621,8 @@ void Repl::draw_prompt()
     if (rendered_lines_ > 1) std::cout << "\033[" << (rendered_lines_ - 1) << "A";
     std::cout << "\r";
 
-    std::cout << "[mem " << format_process_memory(memory) << "] pi> " << line_buffer_;
+    const std::string prompt_prefix = "[mem " + format_process_memory(memory) + "] pi> ";
+    std::cout << prompt_prefix << line_buffer_;
 
     // 3) 渲染命令菜单（输入区之下）
     if (menu_lines > 0)
@@ -645,7 +646,8 @@ void Repl::draw_prompt()
         }
     }
 
-    // 4) 光标定位：按「行 + 显示宽度」回到光标位置（多行输入与全角字符感知）
+    // 4) 光标定位：按「行 + 显示宽度」回到光标位置（多行输入与全角字符感知）。
+    //    首行还要加上提示符前缀的宽度（\r 回到的是该行第 0 列）。
     const size_t line_start = [&]
     {
         if (cursor_ == 0) return size_t{0};
@@ -657,7 +659,8 @@ void Repl::draw_prompt()
     const int lines_above = total_lines - 1 - static_cast<int>(row);
     if (lines_above > 0) std::cout << "\033[" << lines_above << "A";
     std::cout << "\r";
-    if (col > 0) std::cout << "\033[" << col << "C";
+    const size_t target_col = col + (row == 0 ? display_width(prompt_prefix) : 0);
+    if (target_col > 0) std::cout << "\033[" << target_col << "C";
 
     rendered_lines_ = total_lines;
     rendered_cursor_row_ = static_cast<int>(row);
