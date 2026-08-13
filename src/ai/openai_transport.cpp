@@ -8,7 +8,6 @@
 #include <atomic>
 #include <map>
 #include <mutex>
-#include <variant>
 #include <openai/client.hpp>
 #include <openai/error.hpp>
 #include <optional>
@@ -58,6 +57,9 @@ Compat detect_compat(const ModelInfo& model)
         isTogether || baseUrl.find("chutes.ai") != std::string::npos ||
         baseUrl.find("deepseek.com") != std::string::npos || isZai || isMoonshot;
 
+    // 维护提示：这些字段镜像 pi 的 OpenAICompletionsCompat，供未来 provider 分支启用。
+    // 目前所有 provider 都未启用 requiresToolResultName / requiresAssistantAfterToolResult /
+    // requiresThinkingAsText / supportsStore；新增 provider 时对照 pi 的 detectCompat 设置。
     Compat compat;
     compat.supportsStore = !isNonStandard;
     compat.supportsDeveloperRole = !isNonStandard;
@@ -76,16 +78,18 @@ std::string normalize_tool_call_id(const std::string& id, const ModelInfo& model
 {
     if (id.find('|') != std::string::npos)
     {
-        std::string call_id = id.substr(0, id.find('|'));
+        // 镜像 pi：带 | 的 id 取前段并替换非法字符（部分 provider 的 id 由模型名|调用号组成）。
+        const std::string call_id = id.substr(0, id.find('|'));
         std::string sanitized;
         for (char c : call_id)
         {
             bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                       c == '_' || c == '-';
             sanitized += ok ? c : '_';
-            if (sanitized.size() >= 40) break;
         }
-        return sanitized;
+        // 截断到 40 字符（OpenAI tool call id 上限）；若净化后为空则保留原 id。
+        if (sanitized.size() > 40) sanitized.resize(40);
+        return sanitized.empty() ? id : sanitized;
     }
     if (model.provider == "openai" && id.size() > 40) return id.substr(0, 40);
     return id;
@@ -283,7 +287,10 @@ bool has_tool_history(const std::vector<Message>& messages)
 struct ConvertedMessages
 {
     std::vector<openai::ChatMessage> messages;
-    std::vector<openai_json> assistantExtras;  // 按 assistant 消息出现顺序
+    // 不变量：assistantExtras[i] 与 messages 中第 i 条 assistant 消息一一对应（包括
+    // requiresAssistantAfterToolResult 插入的桥接消息，其 extras 为空对象）。
+    // body augmenter 依赖此顺序回注 deepseek 的 reasoning_content 等字段。
+    std::vector<openai_json> assistantExtras;
 };
 
 ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Message>& messages,
@@ -501,6 +508,8 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
                     part.text = "I have processed the tool results.";
                     bridge.content.push_back(std::move(part));
                     out.messages.push_back(std::move(bridge));
+                    // 桥接消息同样占据一个 assistant 槽位，推送空 extras 保持序号对齐
+                    pending_extras.push_back(openai_json::object());
                 }
                 openai::ChatMessage user;
                 user.role = "user";
@@ -655,10 +664,8 @@ class OpenAiCompletionsTransport::Impl
         openai::RequestOptions request_options;
         request_options.max_retries = static_cast<size_t>(opts.maxRetries);
         request_options.timeout = opts.timeoutMs;
-        if (opts.apiKey)
-        {
-            request_options.headers["Authorization"] = "Bearer " + *opts.apiKey;
-        }
+        // 不手动注入 Authorization：客户端已用 request_api_key + use_bearer_auth 构造，
+        // openai-cpp 会自行添加 "Bearer <key>"。这里重复注入会依赖服务端对重复头的处理。
         for (const auto& [key, value] : opts.headers)
         {
             request_options.headers[key] = value;
@@ -696,7 +703,11 @@ class OpenAiCompletionsTransport::Impl
             }
             if (!ctx.hasFinishReason)
             {
-                throw std::runtime_error("Stream ended without finish_reason");
+                throw std::runtime_error(
+                    "Stream ended without finish_reason" +
+                    (ctx.malformedChunks > 0
+                         ? " (" + std::to_string(ctx.malformedChunks) + " malformed chunk(s))"
+                         : ""));
             }
             StreamEvent done;
             done.type = StreamEvent::Type::Done;
@@ -734,6 +745,7 @@ class OpenAiCompletionsTransport::Impl
         const std::function<void(const StreamEvent&)>& sink;
         const ModelInfo& model;
         bool hasFinishReason = false;
+        int malformedChunks = 0;  // 无法解析的 SSE chunk 数（计入最终错误便于排查）
         int textBlockIndex = -1;
         int thinkingBlockIndex = -1;
         std::vector<std::string> partialArgs;
@@ -775,9 +787,14 @@ class OpenAiCompletionsTransport::Impl
         }
         catch (...)
         {
+            ++ctx.malformedChunks;
             return !abort_->load();
         }
-        if (!chunk.is_object()) return !abort_->load();
+        if (!chunk.is_object())
+        {
+            ++ctx.malformedChunks;
+            return !abort_->load();
+        }
 
         auto& output = ctx.output;
 
@@ -1299,6 +1316,8 @@ std::unique_ptr<openai::HttpClient> OpenAiCompletionsTransport::Impl::make_http_
                 if (!msg.is_object()) continue;
                 if (msg.value("role", "") == "assistant")
                 {
+                    // 依赖 ConvertedMessages 的序号对应不变量（见 convert_messages）；
+                    // 超出范围时跳过注入而不是错配。
                     if (assistant_index < assistant_extras_.size() &&
                         !assistant_extras_[assistant_index].is_null())
                     {
