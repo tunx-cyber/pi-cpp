@@ -18,7 +18,9 @@ struct ProcessMemoryUsage
 
 /**
  * 采样当前进程实际使用的内存。
- * Linux 使用 /proc/self/status 的 VmRSS/VmSize；macOS 使用 task_info。
+ * Linux 使用 /proc/self/status 的 VmRSS/VmSize；
+ * macOS 使用 task_vm_info：rss 取 phys_footprint（与「活动监视器」口径一致，
+ * 含压缩页），vms 取 virtual_size（含稀疏映射，数值大不代表实际占用）。
  * 不支持的平台或系统调用失败时返回标记为不可用的快照，不抛出异常。
  */
 ProcessMemoryUsage sample_process_memory();

@@ -74,16 +74,20 @@ ProcessMemoryUsage sample_process_memory()
     content << file.rdbuf();
     return parse_proc_status_memory(content.str());
 #elif defined(__APPLE__)
-    mach_task_basic_info info{};
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info),
+    // macOS 使用 task_vm_info 的 phys_footprint（与「活动监视器」的内存口径一致，
+    // 包含压缩页；resident_size 只计未压缩的物理页）。
+    // virtual_size 含系统级稀疏映射（Apple Silicon 的 jumbo region 可达数百 GiB），
+    // 数值巨大但不代表实际占用，仅供对比。
+    task_vm_info_data_t vm_info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm_info),
                   &count) != KERN_SUCCESS)
     {
         return {};
     }
     ProcessMemoryUsage usage;
-    usage.residentBytes = static_cast<uint64_t>(info.resident_size);
-    usage.virtualBytes = static_cast<uint64_t>(info.virtual_size);
+    usage.residentBytes = static_cast<uint64_t>(vm_info.phys_footprint);
+    usage.virtualBytes = static_cast<uint64_t>(vm_info.virtual_size);
     usage.hasResident = true;
     usage.hasVirtual = true;
     return usage;

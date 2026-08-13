@@ -262,7 +262,7 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 - 流式快捷键：Enter=steer（整行入队）、Esc=abort、Ctrl+C=退出（二次确认，流式中始终生效）。
 - **Ctrl+C 退出路径**：abort → kill 子进程组 → **先恢复终端再 join worker**。worker 尚未收尾时提示「等待运行中的任务结束，Ctrl+C 可立即退出」——终端已回到 cooked 模式，此后的 Ctrl+C 以 SIGINT 直接终止进程，不会被卡在 raw mode（raw mode 下 ISIG 关闭，Ctrl+C 是死键）。
 - 空闲快捷键：Ctrl+P=循环切换模型（flash↔pro）、Ctrl+C=退出。
-- 状态栏：`[model=..] [thinking=..] [cost=$..] [mem rss=.. vms=.. peak_rss=..]`（cost 与 `calculate_cost` 同源）。内存指标针对实际运行的 `picpp` 进程；Linux 读取 `/proc/self/status` 的 `VmRSS`/`VmSize`，macOS 使用 `task_info`。
+- 状态栏：`[model=..] [thinking=..] [cost=$..] [mem rss=.. vms=.. peak_rss=..]`（cost 与 `calculate_cost` 同源）。内存指标针对实际运行的 `picpp` 进程；Linux 读取 `/proc/self/status` 的 `VmRSS`/`VmSize`；macOS 用 `task_vm_info`——`rss` 取 `phys_footprint`（与「活动监视器」同口径，含压缩页），`vms` 取 `virtual_size`（Apple Silicon 的稀疏映射可达数百 GiB，数值大不代表实际占用）。
 - slash 命令：/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /memory /quit + 用户模板（`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`）。
 - 管道模式（非 TTY 或带参数）：`picpp "prompt" [--image path]`，订阅事件流式打印 + usage 行；退出前 kill 全部子进程组，避免 bash 工具遗留孤儿进程。
 

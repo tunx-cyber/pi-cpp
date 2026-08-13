@@ -13,6 +13,7 @@
 
 ### 修复
 
+- **macOS 内存口径**：状态栏 `rss` 从 `resident_size` 改为 `phys_footprint`（与「活动监视器」同口径，含压缩页）；`vms` 仍为 `virtual_size`（Apple Silicon 稀疏映射可达数百 GiB，属正常现象，不代表实际占用）。
 - **光标定位缺失提示符前缀宽度**：`draw_prompt` 光标定位按 `\r` + 右移 N 列实现，此前 N 只含缓冲区内容宽度、漏掉 `[mem …] pi> ` 前缀，光标落在行首而不是 `pi>` 之后；现已加上首行前缀宽度（多行第二行起不加）。
 - **macOS 退出阻塞**：`restore_raw_mode` 从 TCSAFLUSH 改为 TCSANOW——macOS 上 TCSAFLUSH/TCSADRAIN 会等待 pty 输出队列排空，主端无读者时（脚本驱动场景）永久阻塞在 ioctl，表现为 Ctrl+C 后进程"假死"（pty 复现 10/10，修复后 0/10）。
 - **LF 回车丢失**：部分终端在 raw mode 下因 ICRNL 将 Enter 送达为 `\n`，此前只处理 `\r` 导致 Enter 失效。
