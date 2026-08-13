@@ -36,22 +36,19 @@ FetchContent_Declare(
 )
 
 # 声明 valijson（工具参数 JSON Schema 校验，header-only）
+# GIT_SUBMODULES 置空：本项目只引用 valijson 的 include/ 头文件，其子模块
+# （jsoncpp/nlohmann-json/JSON-Schema-Test-Suite）是 valijson 自身测试的依赖，
+# 跳过可省 3 次网络克隆，也避免其中任一仓库传输失败拖垮整个 configure。
 FetchContent_Declare(
   valijson
   GIT_REPOSITORY https://github.com/tristanpenman/valijson.git
   GIT_TAG        v1.0.3
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
+  GIT_SUBMODULES ""
 )
 
-# 声明 stb（图片解码/缩放，header-only）
-FetchContent_Declare(
-  stb
-  GIT_REPOSITORY https://github.com/nothings/stb.git
-  GIT_TAG        master
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
-)
+# stb 是纯 header 库且上游无 CMake 构建文件，直接 vendor 在 third_party/stb/（见其 README）
 
 # 声明 googletest（单元测试框架）
 FetchContent_Declare(
@@ -69,7 +66,6 @@ find_package(CURL REQUIRED)
 FetchContent_MakeAvailable(nlohmann_json)
 FetchContent_MakeAvailable(openai-cpp)
 FetchContent_MakeAvailable(valijson)
-FetchContent_MakeAvailable(stb)
 FetchContent_MakeAvailable(googletest)
 
 
@@ -108,8 +104,9 @@ target_link_libraries(pi_core PUBLIC
   openai::openai
   CURL::libcurl
 )
-target_include_directories(pi_core PUBLIC ${stb_SOURCE_DIR})
 target_include_directories(pi_core PUBLIC ${valijson_SOURCE_DIR}/include)
+# vendored stb（见 third_party/stb/README.md）
+target_include_directories(pi_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
 
 # ============ picpp：终端可执行 ============
 add_executable(picpp

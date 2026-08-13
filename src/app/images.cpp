@@ -4,12 +4,21 @@
 #include <fstream>
 #include <vector>
 
+// stb 上游在 stb_image_write.h 里使用 sprintf，macOS SDK 将其标记为弃用；
+// 该用法在上游是安全的（缓冲区长度已校验），屏蔽已知的第三方告警以保持构建输出干净
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_RESIZE2_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image.h>
 #include <stb_image_resize2.h>
 #include <stb_image_write.h>
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
 
 namespace pi
 {
