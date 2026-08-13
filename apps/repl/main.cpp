@@ -8,6 +8,7 @@
 #include <string>
 
 #include "pi/app/agent_session.h"
+#include "pi/app/commands.h"
 #include "pi/app/images.h"
 #include "pi/app/repl.h"
 #include "pi/app/settings.h"

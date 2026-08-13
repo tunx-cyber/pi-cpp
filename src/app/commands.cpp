@@ -16,37 +16,9 @@
 #include <sstream>
 
 #include "pi/harness/env.h"
-#include "pi/harness/prompt_templates.h"
 
 namespace pi
 {
-
-void CommandRegistry::register_command(const std::string& name, const std::string& description,
-                                       CommandHandler handler)
-{
-    commands_[name] = Entry{description, std::move(handler)};
-}
-
-bool CommandRegistry::run(const CommandContext& context, const std::string& input) const
-{
-    const size_t space = input.find_first_of(" \t");
-    const std::string name =
-        input.substr(1, space == std::string::npos ? std::string::npos : space - 1);
-    const std::string args_str = space == std::string::npos ? "" : input.substr(space + 1);
-    const auto it = commands_.find(name);
-    if (it == commands_.end()) return false;
-    return it->second.handler(context, parse_command_args(args_str));
-}
-
-std::string CommandRegistry::help() const
-{
-    std::string out = "Commands:\n";
-    for (const auto& [name, entry] : commands_)
-    {
-        out += "  /" + name + " - " + entry.description + "\n";
-    }
-    return out;
-}
 
 // ---------- 编码工具 ----------
 
