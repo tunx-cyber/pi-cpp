@@ -29,6 +29,8 @@ API key 自动从以下位置读取（优先级从低到高）：`~/.pi-cpp/.env
 
 REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /quit`。
 
+- 输入 `/` 唤起命令菜单（实时过滤 + Tab 补全）
+- 输入：`Enter`=提交，`Shift+Enter`/`Ctrl+J`/`Option+Enter`=换行（多行输入；Shift+Enter 需终端支持 CSI-u/kitty 键盘协议：iTerm2/kitty/WezTerm）
 - 流式中：`Enter`=steer（排队下一句）、`Esc`=abort、`Ctrl+C`=退出（确认）、`Ctrl+P`=切模型、`Ctrl+L`=重绘
 - `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls + subagent（子 agent 嵌套）。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
 - 会话保存在 `~/.pi-cpp/agent/sessions/<cwd>/<ts>_<id>.jsonl`（pi 兼容 version-3 格式），重启后 `/resume` 恢复
@@ -60,7 +62,7 @@ include/pi/
 ## 测试
 
 ```bash
-./build/pi_tests                # 116 个用例
+./build/pi_tests                # 118 个用例
 # ThreadSanitizer（单测套件 tsan 0 警告；网络受限时用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps，见 docs/TECHNICAL.md §11）
 cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread"
 cmake --build build-tsan && ./build-tsan/pi_tests

@@ -210,7 +210,7 @@ JSONL 格式（pi 兼容 version-3）：
 - `estimate_tokens`：chars/4（text/thinking/toolCall 参数 JSON），图片块固定 4800；`estimate_context_tokens` 用**最近一条成功 assistant 的 usage** 作基准 + 其后消息估算（镜像 estimateContextTokens）；
 - `should_compact = enabled && tokens > contextWindow - reserveTokens`（默认 reserve=16384，keepRecent=20000）；
 - `find_cut_point`：从尾部累积到 `keepRecentTokens`，切点取合法边界（user/assistant 消息、branch_summary/custom_message）；切点前若是 toolResult 等非边界则前移；切点非 user 消息时检测 split-turn（回溯最近的 user 起始）；
-- `prepare_compaction`：跳过上次压缩后的边界、继承上次的 `readFiles/modifiedFiles` details、提取历史中的 read/write/edit 工具参数（路径）；
+- `prepare_compaction`：跳过上次压缩后的边界、继承上次的 `readFiles/modifiedFiles` details、提取历史中的 read/write/edit 工具参数（路径）；无可摘要消息（如新会话只有 model_change 等条目）时返回空 preparation，调用方报 "Nothing to compact" 而不是对空对话发起 LLM 调用；
 - `compact`：LLM 生成摘要（`SUMMARIZATION_SYSTEM_PROMPT` + 结构化格式，带 `<previous-summary>` 增量更新），split-turn 时附加 turn-prefix 摘要；追加 `<read-files>/<modified-files>` 标签；
 - `AgentHarness::run_compaction`：prepare → generate → `session.append_compaction` → 用 `build_context` 重放结果替换 agent 消息。
 
@@ -254,8 +254,11 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 
 ### 5.3 REPL（repl.cpp）
 
-- termios raw mode（进入前保存完整终端设置，退出时原样恢复，不重建近似值），`poll(stdin, event_pipe)` 双路循环；worker 线程跑 `AgentSession::prompt`，事件经 mutex 队列 + pipe 单字节通知送达 UI 线程渲染（UI 线程独占终端写入）。
-- 行编辑：逐字符回显、Backspace（按 UTF-8 序列删除）、左右方向键、Ctrl+L 重绘；Esc 序列后续字节带超时读取（裸按 Esc 不再挂起 UI）。
+- termios raw mode（进入前保存完整终端设置，退出时原样恢复，不重建近似值；退出用 TCSANOW——macOS 上 TCSAFLUSH/TCSADRAIN 会等待 pty 输出队列排空，主端无读者时永久阻塞在 ioctl），`poll(stdin, event_pipe)` 双路循环；worker 线程跑 `AgentSession::prompt`，事件经 mutex 队列 + pipe 单字节通知送达 UI 线程渲染（UI 线程独占终端写入）。
+- **键盘协议**：进入 raw mode 时发送 `CSI > 1 u` 启用 CSI-u/kitty 键盘协议（iTerm2/kitty/WezTerm 支持；不支持的终端忽略并继续发传统字节流），退出时 `CSI < u` 弹栈。按键统一经 `decode_key_event` 解码为 KeyEvent：兼容传统字节（CR/LF、BS、ESC [ 序列）与 CSI-u（`<codepoint>[;<modifiers>]u`）；Ctrl+C 等修饰键在两种编码下都映射一致。Shift+Enter（`13;1u`/`13;2u`）、Ctrl+J（`106;4u`）、Option+Enter（`ESC CR`）三种编码都映射为换行。
+- **命令菜单**：缓冲区首个字符为 `/` 时实时渲染匹配命令（内建命令表 + 用户模板，`builtin_command_entries()` 单一来源，与 /help 共用）；Tab 补全到最长公共前缀（唯一匹配补全并加空格）；最多显示 8 条。
+- **多行输入**：Shift+Enter/Ctrl+J/Option+Enter 插入 `\n`；渲染与光标定位按「行 + 显示宽度」计算（`display_width` 近似 wcwidth，中文/全角/emoji 计 2 列，无 locale 依赖）；提交时保持输入区可见、输出从输入区与菜单之下开始。
+- 行编辑：逐字符回显、Backspace（按 UTF-8 序列删除）、左右方向键、Home/End、Ctrl+L 重绘；Esc 序列后续字节带超时读取（裸按 Esc 不再挂起 UI）。
 - 流式快捷键：Enter=steer（整行入队）、Esc=abort、Ctrl+C=退出（二次确认，流式中始终生效）。
 - **Ctrl+C 退出路径**：abort → kill 子进程组 → **先恢复终端再 join worker**。worker 尚未收尾时提示「等待运行中的任务结束，Ctrl+C 可立即退出」——终端已回到 cooked 模式，此后的 Ctrl+C 以 SIGINT 直接终止进程，不会被卡在 raw mode（raw mode 下 ISIG 关闭，Ctrl+C 是死键）。
 - 空闲快捷键：Ctrl+P=循环切换模型（flash↔pro）、Ctrl+C=退出。
@@ -276,7 +279,7 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 - **abort 传播链**：`Agent::abort()` → 共享 `atomic<bool>` → transport write_callback（中止连接）+ 工具 execute（轮询检查；bash 每 100ms poll 检查并 SIGKILL 进程组，read/grep/find 在遍历循环中检查并返回部分结果）+ 子 agent（watcher 桥接）。
 - **死锁规避**：线程按调用分配（无共享有界线程池 → 无池饥饿）；嵌套深度/轮次上限；子 agent 状态隔离（仅共享 abort atomic）。
 - **锁与共享状态清单**：`JsonlSessionStorage::mutex_`（会话条目/索引）、`uuidv7` 内部互斥（条目 id 生成）、`AgentHarness/AgentSession::cost_mutex_`（成本累计）、`Agent::state_mutex_`（状态快照）、`PendingMessageQueue` 自带互斥。规则：跨线程共享状态要么加锁，要么只在 run 线程写。
-- **tsan 验证**：全套 116 用例（含多线程会话并发追加回归测试）在 `-fsanitize=thread` 下 0 警告。
+- **tsan 验证**：全套 118 用例（含多线程会话并发追加回归测试）在 `-fsanitize=thread` 下 0 警告。
 
 ## 7. Wire 协议细节（DeepSeek）
 
@@ -342,7 +345,7 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
-./build/pi_tests                     # 116 用例
+./build/pi_tests                     # 118 用例
 ./build/picpp                        # 交互 REPL
 ./build/picpp "prompt"               # 管道一次性对话（自动读 .env）
 
@@ -381,7 +384,8 @@ cmake --build build-tsan && ./build-tsan/pi_tests
 
 ### 12.3 提交前检查清单
 
-1. `cmake --build build && ./build/pi_tests` 全绿（当前 116 用例）。
+1. `cmake --build build && ./build/pi_tests` 全绿（当前 118 用例）。
+2. REPL 交互改动（输入解码/渲染/退出路径）必须过 pty 冒烟：菜单唤起、Tab 补全、Shift+Enter/Ctrl+J 多行、空闲 Ctrl+C 干净退出（见 `tests/` 之外的手动清单，pty 脚本驱动）。
 2. 涉及并发/线程改动：跑一遍 tsan（见 §11）。
 3. `clang-format -i` 改动的文件。
 4. 若行为语义有变：更新对应测试、README 与本文档（用例数、wire 表格、已知裁剪清单）。

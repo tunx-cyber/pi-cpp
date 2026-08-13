@@ -2,6 +2,33 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式（无版本号，按日期记录）。
 
+## 2026-08-13（二）REPL 交互：命令菜单与多行输入
+
+### 新增
+
+- **命令菜单**：输入 `/`（缓冲区首个字符）唤起实时过滤的菜单（内建命令 + 用户模板，最多 8 条），Tab 补全到最长公共前缀（唯一匹配补全并加空格）；内建命令表 `builtin_command_entries()` 与 /help 共用单一来源。
+- **多行输入**：`Shift+Enter` / `Ctrl+J` / `Option+Enter` 插入换行（三种编码都映射为换行，覆盖支持与不支持 CSI-u 的终端）。
+- **CSI-u/kitty 键盘协议**：进入 raw mode 发送 `CSI > 1 u` 启用（iTerm2/kitty/WezTerm），退出弹栈；按键统一经 `decode_key_event` 解码，传统字节流与 CSI-u 编码下 Ctrl+C/Esc/方向键等行为一致。
+- **全角宽度感知的光标定位**：`display_width` 近似 wcwidth（中文/全角/emoji 计 2 列，无 locale 依赖），多行输入下光标与重绘对齐；Home/End 键支持。
+
+### 修复
+
+- **macOS 退出阻塞**：`restore_raw_mode` 从 TCSAFLUSH 改为 TCSANOW——macOS 上 TCSAFLUSH/TCSADRAIN 会等待 pty 输出队列排空，主端无读者时（脚本驱动场景）永久阻塞在 ioctl，表现为 Ctrl+C 后进程"假死"（pty 复现 10/10，修复后 0/10）。
+- **LF 回车丢失**：部分终端在 raw mode 下因 ICRNL 将 Enter 送达为 `\n`，此前只处理 `\r` 导致 Enter 失效。
+- **/compact 对空对话发起 LLM 调用**：`prepare_compaction` 无可摘要消息时（如新会话只有 model_change/thinking_level_change 条目）返回空 preparation，改为立即报 "Nothing to compact"；/compact 执行前提示「压缩中…」（摘要调用在 UI 线程同步执行）。
+- 流式中 Ctrl+C 二次确认改为按解码后的事件匹配（CSI-u 终端下第二次 Ctrl+C 也能识别）。
+
+### 重构
+
+- 移除死代码：`CommandRegistry`/`CommandContext`（从未被使用）、Repl 的 `registry_`/`event_cv_`/未使用的 token 累计成员、`UiEvent::Status` 事件类型。
+- 渲染状态重构：`rendered_lines_`/`rendered_cursor_row_` 跟踪提示块，多行输入与菜单统一重绘。
+
+### 文档 / 测试
+
+- TECHNICAL.md §5.3 重写（键盘协议、命令菜单、多行输入、TCSANOW 注意事项），§4.2 补 compaction 空摘要语义，维护清单补 REPL pty 冒烟项。
+- 新增 compaction 回归测试（无可摘要消息 → nullopt；split-turn 切点检测）。全套 118 用例，tsan 0 警告。
+- pty 冒烟（脚本驱动）：菜单/过滤/Tab 补全/Shift+Enter/Ctrl+J/中文/CSI-u 提交/空闲 Ctrl+C 退出，全部通过。
+
 ## 2026-08-13
 
 ### 修复
