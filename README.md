@@ -12,7 +12,7 @@ pi（TypeScript 终端 Agent）的 C++ 移植版。最核心的 agent 功能：�
 
 ## 构建
 
-依赖：CMake ≥ 3.16、Ninja、clang、libcurl。第三方库（nlohmann-json、openai-cpp、valijson、stb、googletest）由 FetchContent 自动下载。
+依赖：CMake ≥ 3.16、Ninja、clang、libcurl。第三方库（nlohmann-json、openai-cpp、valijson、googletest）由 FetchContent 自动下载；stb 已 vendor 在 `third_party/stb/`（纯 header，无需下载）。
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -40,7 +40,7 @@ REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /im
 - 输入 `/` 唤起命令菜单（实时过滤 + Tab 补全）
 - 输入：`Enter`=提交，`Shift+Enter`/`Ctrl+J`/`Option+Enter`=换行（多行输入；Shift+Enter 需终端支持 CSI-u/kitty 键盘协议：iTerm2/kitty/WezTerm）
 - 流式中：`Enter`=steer（排队下一句）、`Esc`=abort、`Ctrl+C`=退出（确认）、`Ctrl+P`=切模型、`Ctrl+L`=重绘
-- `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls + subagent（子 agent 嵌套）。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
+- `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls / web_fetch + subagent（子 agent 嵌套）。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
 - 会话保存在 `~/.pi-cpp/agent/sessions/<cwd>/<ts>_<id>.jsonl`（pi 兼容 version-3 格式），重启后 `/resume` 恢复
 - 用户模板：`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`（支持 `$1`/`$@`/`${@:N:L}`）
 
@@ -70,7 +70,7 @@ include/pi/
 ## 测试
 
 ```bash
-./build/pi_tests                # 118 个用例
+./build/pi_tests                # 127 个用例（另有 1 个真实联网用例默认跳过）
 # ThreadSanitizer（单测套件 tsan 0 警告；网络受限时用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps，见 docs/TECHNICAL.md §11）
 cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread"
 cmake --build build-tsan && ./build-tsan/pi_tests

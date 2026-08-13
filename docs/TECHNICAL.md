@@ -346,16 +346,16 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
-./build/pi_tests                     # 118 用例
+./build/pi_tests                     # 127 用例
 ./build/picpp                        # 交互 REPL
 ./build/picpp "prompt"               # 管道一次性对话（自动读 .env）
 
-# ThreadSanitizer（网络受限时可用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps 已下载的依赖源）
+# ThreadSanitizer（网络受限时可用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps 已下载的依赖源；
+# stb 已 vendor 在 third_party/stb/，无需拉取）
 cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
   -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=build/_deps/nlohmann_json-src \
   -DFETCHCONTENT_SOURCE_DIR_OPENAI-CPP=build/_deps/openai-cpp-src \
   -DFETCHCONTENT_SOURCE_DIR_VALIJSON=build/_deps/valijson-src \
-  -DFETCHCONTENT_SOURCE_DIR_STB=build/_deps/stb-src \
   -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=build/_deps/googletest-src
 cmake --build build-tsan && ./build-tsan/pi_tests
 ```
@@ -374,6 +374,7 @@ cmake --build build-tsan && ./build-tsan/pi_tests
 4. **`stream_chat` 契约**：不得抛异常；一切失败以 `kError` 事件终止。任何改动不得在 sink 调用之外泄漏异常。
 5. **成本/用量统计**：累计值写入必须持 `cost_mutex_`（AgentHarness 与 AgentSession 各有一把）。读取同样加锁。
 6. **行为规范是 pi 的 vitest 套件**：agent_loop / compaction / session / transport 的语义对照 pi 对应测试，改动行为时同步更新本仓库对应测试与本文档。
+7. **工具执行不得抛异常**：工具在 agent 循环中无 try/catch 包裹，异常会冒泡到 `Agent::run` 的兜底 catch，直接终结整轮对话。参数解析（尤其 LLM 传入的 `get<type>()`）必须自行兜底为错误文本——web_fetch 的整体 try/catch 是范例。
 
 ### 12.2 新增 provider / 模型 / 工具 / 命令
 
@@ -381,13 +382,13 @@ cmake --build build-tsan && ./build-tsan/pi_tests
 |---|---|
 | 内置模型 | `src/ai/model_registry.cpp` 的 `build_builtin_models()`；运行时 override 用 `register_model` |
 | provider 兼容分支 | `src/ai/openai_transport.cpp` 的 `detect_compat`（镜像 pi detectCompat，同步 §2.5/§7 wire 表格） |
-| 编码工具 | `src/app/commands.cpp` 的 `make_coding_tools`（schema 由 valijson 自动校验；`executionMode=Sequential` 可强制串行） |
+| 编码工具 | `src/app/commands.cpp` 的 `make_coding_tools`（schema 由 valijson 自动校验；`executionMode=Sequential` 可强制串行）。web_fetch 走 libcurl，详见 §12.1 第 7 条契约 |
 | slash 命令 | `src/app/repl.cpp` 的 `handle_command`（按现有 if 链追加）；用户模板放 `~/.pi-cpp/templates/<name>.md` |
 | 会话 JSONL 格式 | `src/harness/session.cpp`（version-3 头部；格式变更必须兼容旧文件，`session_entry_from_json` 负责解析） |
 
 ### 12.3 提交前检查清单
 
-1. `cmake --build build && ./build/pi_tests` 全绿（当前 118 用例）。
+1. `cmake --build build && ./build/pi_tests` 全绿（当前 127 用例；另有 1 个真实联网用例默认跳过，`PI_LIVE_NET_TESTS=1` 启用）。
 2. REPL 交互改动（输入解码/渲染/退出路径）必须过 pty 冒烟：菜单唤起、Tab 补全、Shift+Enter/Ctrl+J 多行、空闲 Ctrl+C 干净退出（见 `tests/` 之外的手动清单，pty 脚本驱动）。
 2. 涉及并发/线程改动：跑一遍 tsan（见 §11）。
 3. `clang-format -i` 改动的文件。

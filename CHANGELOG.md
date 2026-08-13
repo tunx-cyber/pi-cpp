@@ -2,7 +2,25 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式（无版本号，按日期记录）。
 
-## 2026-08-13（二）REPL 交互：命令菜单与多行输入
+## 2026-08-14（五）web_fetch 联网工具
+
+### 新增
+
+- **web_fetch 工具**：`/tools` 后 agent 可抓取网页（libcurl）。仅允许 http/https（scheme 大小写不敏感）；跟随重定向（≤5 跳，且重定向协议限定 http/https）；10s 连接超时 + 可配置总超时（默认 15s，上限 60s）；`max_chars` 按 UTF-8 字符边界截断（默认 20000，上限 100000，下载硬上限 4×max_chars 字节，超出报 "response too large"）；支持 gzip 自动解压；Esc/Ctrl+C 后经 progress callback 中止（返回 "aborted"）。
+- **封闭测试**：进程内本地 HTTP 服务器（127.0.0.1 随机端口，不依赖外网）走真实 libcurl 路径验证 8 个场景：200/content-type、404 透传、UTF-8 字符边界截断、302 重定向、abort 信号、超时、混合大小写 scheme、非法参数。另加 1 个默认跳过的真实联网用例（`PI_LIVE_NET_TESTS=1` 启用，不进 CI）。
+
+### 修复
+
+- **工具参数异常兜底**：LLM 传错参数类型（如 `max_chars: "50"`）时 `get<int>()` 会抛异常，而 agent 循环不捕获工具异常，整轮对话直接失败；web_fetch 整体 try/catch，错误以 `[web_fetch error] invalid arguments` 文本返回（并写入维护指南 §12.1 第 7 条契约）。
+- **环境代理劫持 localhost**：libcurl 不像 curl CLI 默认绕过代理，本机回环请求会被转发给代理；设置 `CURLOPT_NOPROXY=localhost,127.0.0.1`。
+- **stb 在 CMake 4.x 下构建失败**：`FetchContent_MakeAvailable` 自 CMake 3.30/4.x 起要求源码根存在 CMakeLists.txt（旧版静默跳过），stb 上游是纯 header 库导致 configure 报错。最终方案：**stb 改为仓库内 vendored 依赖**（`third_party/stb/`，固定 commit 2c980bb，仅含用到的 3 个头文件），彻底移除 FetchContent 拉取——不再受 CMake 版本影响，也不再每次 configure 联网 fetch（此前 `GIT_TAG master` 在代理不可用时连增量构建都会挂）。
+- **valijson 子模块拖垮从零构建**：valijson 的 populate 会递归克隆 3 个测试子模块（jsoncpp/nlohmann-json/JSON-Schema-Test-Suite），任一传输中断都让 configure 失败；本项目只用其 header，`GIT_SUBMODULES ""` 跳过——从零构建网络传输从 8 次降到 4 次，代理抖动时也能稳定构建。
+
+### 文档 / 测试
+
+- 全套 127 用例通过，tsan 0 警告；真实联网（example.com）经代理验证 200 通过。
+
+## 2026-08-13（四）REPL 交互：命令菜单与多行输入
 
 ### 新增
 
