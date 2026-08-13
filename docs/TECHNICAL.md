@@ -50,7 +50,7 @@ pi-cpp/
 
 - `SseParser`：增量解析（data/event/id 字段、空行分发、CRLF、多行 data 以 `\n` 连接、注释行忽略）。可单测，fake server 依赖它构造响应。
 - `repair_json`：修复字符串内的控制字符与非法转义（镜像 `repairJson`）。
-- `parse_streaming_json`：完整解析 → repair 重试 → 尾部截断取最长合法前缀 → `{}` 兜底。永不抛异常。
+- `parse_streaming_json`：完整解析 → repair 重试 → 前缀扫描回退（`longest_valid_json_prefix`：一次前向扫描收集「可能成为完整 JSON 值末尾」的位置，从右向左尝试解析；避免逐字符弹出重解析对未闭合大字符串（write 工具的流式参数）的 O(n²) 最坏情况）→ `{}` 兜底。永不抛异常。
 
 ### 2.4 TransportAdapter 接口（transport_adapter.h）
 
@@ -97,7 +97,9 @@ class TransportAdapter {
 4. **body augmenter**：openai-cpp 的 typed 结构无法表达 deepseek 的 `thinking` 参数与 assistant 消息的 `reasoning_content` 回放，因此在自定义 HttpClient 层解析请求体 JSON 后注入：
    - `model.reasoning && thinkingFormat=="deepseek"` → `body["thinking"] = {type: "enabled"/"disabled"}`；
    - 每个 assistant 消息按签名注入 `reasoning_content`（回放 thinking）或空串（deepseek 要求所有回放 assistant 消息携带）；
-   - 有 tool_calls 无 content 的 assistant 消息 → `content: null`。
+   - 有 tool_calls 无 content 的 assistant 消息 → `content: null`；
+   - **注入序号不变量**：`assistantExtras[i]` 与请求体第 i 条 assistant 消息一一对应（`requiresAssistantAfterToolResult` 插入的桥接消息同样占一个槽位、推空 extras）；augmenter 超范围时跳过注入而非错配；
+   - `Authorization` 头由 openai-cpp 客户端统一注入（`use_bearer_auth`），transport 不手动添加，避免重复头。
 
 流式解析（`handle_sse_event`，镜像 openai-completions.ts 的 for-await 循环）：
 
@@ -108,6 +110,7 @@ class TransportAdapter {
 - delta.tool_calls 按 index/id 累积（`byStreamIndex`/`byCallId` 双索引），`partialArgs` 累积 + `parse_streaming_json` 容错解析；
 - `reasoning_details` → 匹配 toolCall 的 `thoughtSignature`；
 - 每个 chunk 间检查 abort → 返回 false 停止分发 + HttpClient 中止连接；
+- 无法解析的 chunk 计入 `malformedChunks`，流无 finish_reason 终止时并入最终错误信息（便于排查损坏流）；
 - 流结束后按 block 顺序发 end 事件（thinking_end → toolcall_end → text_end），再检查 abort/error/无 finish_reason 三种后置条件，发 done。
 
 **AbortableHttpClient**（自定义 `openai::HttpClient`）：
@@ -176,7 +179,7 @@ outer loop: getFollowUpMessages → 非空则继续内层；否则 agent_end
 - 子 agent 工具列表 = 共享工具 + 递归 `subagent` 工具（depth+1）；
 - 子 agent 流式文本 delta 经 `onUpdate` 转发为父的 `tool_execution_update`；
 - abort 链：父 signal → 专用 watcher 线程（`run_finished` 标志防无限轮询）→ `sub_agent.abort()`；prompt 前已 abort 直接失败；
-- 防护：`maxNestingDepth`（depth 超限返回错误）、`maxTurns`（`shouldStopAfterTurn` 钩子计数，达到即停）；
+- 防护：`maxNestingDepth`（depth 超限返回错误）、`maxTurns`（`shouldStopAfterTurn` 钩子计数，达到即停；若最后一轮已给出干净的最终回答则照常返回，仅当最后一条 assistant 消息仍含工具调用——工作被截断——时才报超限）；
 - 结果包装为 `<subagent>\n{最终 assistant 文本}\n</subagent>`（排除 error/aborted 消息）。
 
 ## 4. harness 层
@@ -196,7 +199,9 @@ JSONL 格式（pi 兼容 version-3）：
 {"type":"custom"/"custom_message"/"label"/"session_info"/"leaf"}
 ```
 
-- `JsonlSessionStorage`：append-only；`currentLeafId` 跟踪（leaf 条目指向当前分支）；`get_path_to_root` 沿 parentId 回溯（父链不存在报 invalid_session）；条目 id 为 uuidv7 前 8 位（冲突重试）。
+- `JsonlSessionStorage`：append-only；`currentLeafId` 跟踪（leaf 条目指向当前分支）；`get_path_to_root` 沿 parentId 回溯（父链不存在报 invalid_session）；条目 id 为 uuidv7 前 8 位（冲突重试，uuidv7 内部状态串行化）。
+- **线程安全**：所有公开方法由内部 mutex 保护；`append_child` 在单次加锁内完成「生成 id → 挂到当前 leaf → 落盘」。run 线程（消息持久化）与 UI 线程（/model、/thinking、/tools 切换）并发追加时历史链保持线性，不会产生孤儿分支或交错写坏 JSONL。
+- **尾行损坏自愈**：进程在追加中途被强杀（Ctrl+C/SIGKILL）会在文件尾留下半行 JSON。`open()` 对最后一条非空行解析失败做截断修复（写回最后一个完整行）；文件中部的损坏仍然拒绝打开。
 - 目录布局：`~/.pi-cpp/agent/sessions/<--编码后cwd-->/<ts>_<id>.jsonl`，cwd 编码为 `--` + 路径去前导 `/`、`/:\` 换 `-` + `--`。
 - `Session::build_context` 重放：thinking_level/model（model_change 与 assistant 消息都能更新 model）/active_tools 扫描；compaction 条目存在时用摘要消息替换压缩前历史（`firstKeptEntryId` 起保留）。
 
@@ -218,11 +223,11 @@ JSONL 格式（pi 兼容 version-3）：
 ### 4.4 env（POSIX）
 
 - `PosixFileSystem`：所有操作返回 `Result<T, FileError>` 不抛异常；`resolve` 相对 cwd；`absolute_path` 语法归一化（不解析符号链接）；错误码区分 not_found/permission/not_directory 等。
-- `PosixShell::exec`：fork/exec `/bin/sh -c`，stdout/stderr 管道**非阻塞 + poll(100ms)**，abort → SIGKILL，timeout 秒级；流式回调 `onStdout/onStderr`。
+- `PosixShell::exec`：fork/exec `/bin/sh -c`，stdout/stderr 管道**非阻塞 + poll(100ms)**，abort → SIGKILL，timeout 秒级；流式回调 `onStdout/onStderr`；`options.env` 覆盖在 fork 前构造 envp（fork 后至 exec 之间只允许 async-signal-safe 调用，不能在子进程 setenv/malloc），经 `execle` 传入。
 
 ### 4.5 AgentHarness
 
-- 构造：Agent + Session + 工具 + skills + transport；订阅 agent 事件 → `message_end` 持久化 + 成本累计。
+- 构造：Agent + Session + 工具 + skills + transport；订阅 agent 事件 → `message_end` 持久化 + 成本累计（`total_cost_` 由 mutex 保护：run 线程写、UI 线程读）。
 - `resume`：`build_context` 恢复 model（`get_model(modelId)` 校验）/thinking/active tools/messages。
 - `set_model`/`set_thinking_level`/`set_tools`：持久化 `model_change`/`thinking_level_change`/`active_tools_change` 条目。
 - 自动压缩：`prompt` 返回后估算会话 token，超阈值触发 `compact`。
@@ -249,13 +254,14 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 
 ### 5.3 REPL（repl.cpp）
 
-- termios raw mode，`poll(stdin, event_pipe)` 双路循环；worker 线程跑 `AgentSession::prompt`，事件经 mutex 队列 + pipe 单字节通知送达 UI 线程渲染（UI 线程独占终端写入）。
-- 行编辑：逐字符回显、Backspace、左右方向键、Ctrl+L 重绘。
-- 流式快捷键：Enter=steer（整行入队）、Esc=abort、Ctrl+C=退出（二次确认）。
+- termios raw mode（进入前保存完整终端设置，退出时原样恢复，不重建近似值），`poll(stdin, event_pipe)` 双路循环；worker 线程跑 `AgentSession::prompt`，事件经 mutex 队列 + pipe 单字节通知送达 UI 线程渲染（UI 线程独占终端写入）。
+- 行编辑：逐字符回显、Backspace（按 UTF-8 序列删除）、左右方向键、Ctrl+L 重绘；Esc 序列后续字节带超时读取（裸按 Esc 不再挂起 UI）。
+- 流式快捷键：Enter=steer（整行入队）、Esc=abort、Ctrl+C=退出（二次确认，流式中始终生效）。
+- **Ctrl+C 退出路径**：abort → kill 子进程组 → **先恢复终端再 join worker**。worker 尚未收尾时提示「等待运行中的任务结束，Ctrl+C 可立即退出」——终端已回到 cooked 模式，此后的 Ctrl+C 以 SIGINT 直接终止进程，不会被卡在 raw mode（raw mode 下 ISIG 关闭，Ctrl+C 是死键）。
 - 空闲快捷键：Ctrl+P=循环切换模型（flash↔pro）、Ctrl+C=退出。
-- 状态栏：`[model=..] [thinking=..] [cost=$..] [mem rss=.. vms=.. peak_rss=..]`（cost 与 `calculate_cost` 同源）。内存指标针对实际运行的 `pi_repl` 进程；Linux 读取 `/proc/self/status` 的 `VmRSS`/`VmSize`，macOS 使用 `task_info`。
+- 状态栏：`[model=..] [thinking=..] [cost=$..] [mem rss=.. vms=.. peak_rss=..]`（cost 与 `calculate_cost` 同源）。内存指标针对实际运行的 `picpp` 进程；Linux 读取 `/proc/self/status` 的 `VmRSS`/`VmSize`，macOS 使用 `task_info`。
 - slash 命令：/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /memory /quit + 用户模板（`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`）。
-- 管道模式（非 TTY 或带参数）：`pi_repl "prompt" [--image path]`，订阅事件流式打印 + usage 行。
+- 管道模式（非 TTY 或带参数）：`picpp "prompt" [--image path]`，订阅事件流式打印 + usage 行；退出前 kill 全部子进程组，避免 bash 工具遗留孤儿进程。
 
 ## 6. 并发模型
 
@@ -267,9 +273,10 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 | 子 agent | 父工具线程内联（不跳线程） | 自身 HTTP |
 
 - **事件通道**：mutex+condvar deque + pipe 通知字节；只有 R1 推送事件（工具事件由循环收集后从 R1 发出）。
-- **abort 传播链**：`Agent::abort()` → 共享 `atomic<bool>` → transport write_callback（中止连接）+ 工具 execute（轮询检查）+ 子 agent（watcher 桥接）。
+- **abort 传播链**：`Agent::abort()` → 共享 `atomic<bool>` → transport write_callback（中止连接）+ 工具 execute（轮询检查；bash 每 100ms poll 检查并 SIGKILL 进程组，read/grep/find 在遍历循环中检查并返回部分结果）+ 子 agent（watcher 桥接）。
 - **死锁规避**：线程按调用分配（无共享有界线程池 → 无池饥饿）；嵌套深度/轮次上限；子 agent 状态隔离（仅共享 abort atomic）。
-- **tsan 验证**：全套 97 用例在 `-fsanitize=thread` 下 0 警告。
+- **锁与共享状态清单**：`JsonlSessionStorage::mutex_`（会话条目/索引）、`uuidv7` 内部互斥（条目 id 生成）、`AgentHarness/AgentSession::cost_mutex_`（成本累计）、`Agent::state_mutex_`（状态快照）、`PendingMessageQueue` 自带互斥。规则：跨线程共享状态要么加锁，要么只在 run 线程写。
+- **tsan 验证**：全套 116 用例（含多线程会话并发追加回归测试）在 `-fsanitize=thread` 下 0 警告。
 
 ## 7. Wire 协议细节（DeepSeek）
 
@@ -328,20 +335,53 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 4. **REPL 简化**：无补全/历史；流式时普通字符输入不缓冲（只接受 Enter/Esc/Ctrl+C）。
 5. **compaction 简化**：split-turn 的 turn-prefix 摘要复用主摘要生成函数；无 branch summarization 全流程。
 6. **skills 忽略文件**：不实现 .gitignore 匹配（目录遍历固定排除 .git/build/node_modules）。
-7. **bash 工具**：POSIX `/bin/sh`，无伪终端/交互式命令支持。
+7. **bash 工具**：POSIX `/bin/sh`，无伪终端/交互式命令支持；支持 `options.env` 环境覆盖。**无人工确认审批**（pi 的审批流未移植）：agent 自主执行任意 shell 命令（cwd 限定在 workspace 内，但命令内容不受限），仅建议个人终端使用。
 
 ## 11. 构建与验证
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
-./build/pi_tests                     # 97 用例
-./build/pi_repl                      # 交互 REPL
-./build/pi_repl "prompt"             # 管道一次性对话（自动读 .env）
+./build/pi_tests                     # 116 用例
+./build/picpp                        # 交互 REPL
+./build/picpp "prompt"               # 管道一次性对话（自动读 .env）
 
-# ThreadSanitizer
-cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread"
+# ThreadSanitizer（网络受限时可用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps 已下载的依赖源）
+cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
+  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=build/_deps/nlohmann_json-src \
+  -DFETCHCONTENT_SOURCE_DIR_OPENAI-CPP=build/_deps/openai-cpp-src \
+  -DFETCHCONTENT_SOURCE_DIR_VALIJSON=build/_deps/valijson-src \
+  -DFETCHCONTENT_SOURCE_DIR_STB=build/_deps/stb-src \
+  -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=build/_deps/googletest-src
 cmake --build build-tsan && ./build-tsan/pi_tests
 ```
 
 代码风格：`.clang-format`（Google 基础 + Allman 大括号 + 4 空格缩进 + 100 列 + include regroup），`clang-format -i $(find include src apps tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h')`。
+
+## 12. 维护指南（人工维护必读）
+
+### 12.1 必须保持的不变量
+
+1. **事件只从 run 线程派发**：并行工具线程的流式 update 先收集（completion_mutex），由 run 线程在完成序阶段统一发出（agent_loop.cpp `execute_tool_calls_parallel`）。新增任何异步事件源都必须沿用这一约束，否则 UI 终端渲染会交错。
+2. **会话存储线程安全**：`JsonlSessionStorage` 的所有公开方法都假设被 UI 线程与 run 线程并发调用。新增方法必须持有内部 mutex；「读 leaf + 追加」的复合操作必须走 `append_child`（单次加锁），拆成多个独立加锁调用会产生孤儿分支。对象经 shared_ptr 共享、只允许移动（拷贝被禁用，见 session.h 注释）。
+3. **`assistantExtras` 序号对应**：`convert_messages` 生成的 extras 必须与请求体 assistant 消息一一对应（含桥接消息）。在 convert 或 augmenter 里增删 assistant 消息时，必须同步维护 extras，否则 deepseek 的 `reasoning_content` 回放会错位。
+4. **`stream_chat` 契约**：不得抛异常；一切失败以 `kError` 事件终止。任何改动不得在 sink 调用之外泄漏异常。
+5. **成本/用量统计**：累计值写入必须持 `cost_mutex_`（AgentHarness 与 AgentSession 各有一把）。读取同样加锁。
+6. **行为规范是 pi 的 vitest 套件**：agent_loop / compaction / session / transport 的语义对照 pi 对应测试，改动行为时同步更新本仓库对应测试与本文档。
+
+### 12.2 新增 provider / 模型 / 工具 / 命令
+
+| 改动 | 位置 |
+|---|---|
+| 内置模型 | `src/ai/model_registry.cpp` 的 `build_builtin_models()`；运行时 override 用 `register_model` |
+| provider 兼容分支 | `src/ai/openai_transport.cpp` 的 `detect_compat`（镜像 pi detectCompat，同步 §2.5/§7 wire 表格） |
+| 编码工具 | `src/app/commands.cpp` 的 `make_coding_tools`（schema 由 valijson 自动校验；`executionMode=Sequential` 可强制串行） |
+| slash 命令 | `src/app/repl.cpp` 的 `handle_command`（按现有 if 链追加）；用户模板放 `~/.pi-cpp/templates/<name>.md` |
+| 会话 JSONL 格式 | `src/harness/session.cpp`（version-3 头部；格式变更必须兼容旧文件，`session_entry_from_json` 负责解析） |
+
+### 12.3 提交前检查清单
+
+1. `cmake --build build && ./build/pi_tests` 全绿（当前 116 用例）。
+2. 涉及并发/线程改动：跑一遍 tsan（见 §11）。
+3. `clang-format -i` 改动的文件。
+4. 若行为语义有变：更新对应测试、README 与本文档（用例数、wire 表格、已知裁剪清单）。

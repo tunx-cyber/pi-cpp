@@ -15,14 +15,14 @@ cmake --build build
 
 ```bash
 # 交互式 REPL
-./build/pi_repl
+./build/picpp
 
 # 一次性对话（管道模式）
-./build/pi_repl "用一句话介绍你自己"
-echo "hello" | ./build/pi_repl
+./build/picpp "用一句话介绍你自己"
+echo "hello" | ./build/picpp
 
 # 图片输入（deepseek 当前不支持图片，自动降级为占位文本）
-./build/pi_repl "这是什么" --image photo.png
+./build/picpp "这是什么" --image photo.png
 ```
 
 API key 自动从以下位置读取（优先级从低到高）：`~/.pi-cpp/.env`、当前目录向上最近的项目 `.env`（`DEEPSEEK_API_KEY` / `OPENAI_API_KEY`）、环境变量 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `PI_API_KEY`。端点/模型可用 `PI_BASE_URL` / `PI_MODEL` 覆盖。
@@ -30,7 +30,7 @@ API key 自动从以下位置读取（优先级从低到高）：`~/.pi-cpp/.env
 REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /quit`。
 
 - 流式中：`Enter`=steer（排队下一句）、`Esc`=abort、`Ctrl+C`=退出（确认）、`Ctrl+P`=切模型、`Ctrl+L`=重绘
-- `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls + subagent（子 agent 嵌套）
+- `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls + subagent（子 agent 嵌套）。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
 - 会话保存在 `~/.pi-cpp/agent/sessions/<cwd>/<ts>_<id>.jsonl`（pi 兼容 version-3 格式），重启后 `/resume` 恢复
 - 用户模板：`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`（支持 `$1`/`$@`/`${@:N:L}`）
 
@@ -60,8 +60,8 @@ include/pi/
 ## 测试
 
 ```bash
-./build/pi_tests                # 97 个用例
-# ThreadSanitizer（tsan 清零）
+./build/pi_tests                # 116 个用例
+# ThreadSanitizer（单测套件 tsan 0 警告；网络受限时用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps，见 docs/TECHNICAL.md §11）
 cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread"
 cmake --build build-tsan && ./build-tsan/pi_tests
 ```
