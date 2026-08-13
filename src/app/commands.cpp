@@ -1,5 +1,6 @@
 #include "pi/app/commands.h"
 
+#include <curl/curl.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -9,6 +10,7 @@
 #include <cstring>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <fstream>
 #include <filesystem>
@@ -115,6 +117,143 @@ std::optional<std::string> workspace_path(const std::string& cwd, const std::str
                (relative == std::filesystem::path("..") || relative.begin()->string() == "..")))
         return std::nullopt;
     return canonical.string();
+}
+
+// ---------- web fetch ----------
+
+struct CurlFetchResult
+{
+    long statusCode = 0;
+    std::string body;
+    std::string contentType;
+    std::string error;
+};
+
+struct CurlWriteContext
+{
+    std::string body;
+    size_t maxBytes = 0;
+};
+
+size_t curl_write_callback(char* ptr, size_t size, size_t nmemb, void* userdata)
+{
+    const size_t total = size * nmemb;
+    auto* ctx = static_cast<CurlWriteContext*>(userdata);
+    // 超过上限返回 0，让 curl 报 CURLE_WRITE_ERROR 并停止接收
+    if (total > ctx->maxBytes || ctx->body.size() + total > ctx->maxBytes) return 0;
+    ctx->body.append(ptr, total);
+    return total;
+}
+
+int curl_progress_callback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+{
+    const auto* signal = static_cast<const std::atomic<bool>*>(clientp);
+    return signal && signal->load() ? 1 : 0;
+}
+
+/** 按 UTF-8 字符边界截断到最多 max_chars 个字符，不会切断多字节字符。 */
+std::string truncate_utf8_chars(const std::string& text, size_t max_chars)
+{
+    if (text.size() <= max_chars) return text;
+    size_t i = 0;
+    size_t count = 0;
+    while (i < text.size() && count < max_chars)
+    {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        size_t len = 1;
+        if ((c & 0xE0) == 0xC0)
+        {
+            len = 2;
+        }
+        else if ((c & 0xF0) == 0xE0)
+        {
+            len = 3;
+        }
+        else if ((c & 0xF8) == 0xF0)
+        {
+            len = 4;
+        }
+        if (i + len > text.size()) break;
+        i += len;
+        ++count;
+    }
+    return text.substr(0, i);
+}
+
+/**
+ * HTTP/HTTPS GET（libcurl）。仅允许 http/https；支持重定向、超时、大小上限、
+ * abort 感知（progress callback 检查 signal）。不得抛异常——失败以 CurlFetchResult::error 返回。
+ */
+CurlFetchResult fetch_url(const std::string& url, int timeout_seconds, size_t max_bytes,
+                          const std::shared_ptr<std::atomic<bool>>& signal)
+{
+    CurlFetchResult result;
+    // scheme 大小写不敏感（LLM 可能输出 Https://…），其余部分按原样交给 curl
+    std::string lower_prefix = url.substr(0, 8);
+    std::transform(lower_prefix.begin(), lower_prefix.end(), lower_prefix.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower_prefix.rfind("http://", 0) != 0 && lower_prefix.rfind("https://", 0) != 0)
+    {
+        result.error = "only http/https URLs are supported";
+        return result;
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl)
+    {
+        result.error = "curl_easy_init failed";
+        return result;
+    }
+
+    CurlWriteContext ctx;
+    ctx.maxBytes = max_bytes;
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    // 重定向只允许 http/https（默认还含 ftp/ftps）
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout_seconds) * 1000L);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "pi-cpp-fetch/1.0");
+    // 环境代理直连本机回环（libcurl 不像 curl CLI 默认绕过代理，否则本地服务会被转发到代理）
+    curl_easy_setopt(curl, CURLOPT_NOPROXY, "localhost,127.0.0.1");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    // abort 感知：progress callback 返回 1 会让 curl 以 CURLE_ABORTED_BY_CALLBACK 终止
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, signal.get());
+
+    const CURLcode res = curl_easy_perform(curl);
+    if (res == CURLE_OK)
+    {
+        long status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+        result.statusCode = status;
+        char* contentType = nullptr;
+        if (curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &contentType) == CURLE_OK && contentType)
+        {
+            result.contentType = contentType;
+        }
+    }
+    else if (res == CURLE_ABORTED_BY_CALLBACK)
+    {
+        result.error = "aborted";
+    }
+    else if (res == CURLE_WRITE_ERROR)
+    {
+        result.error = "response too large (max " + std::to_string(max_bytes) + " bytes)";
+    }
+    else
+    {
+        result.error = curl_easy_strerror(res);
+    }
+
+    result.body = std::move(ctx.body);
+    curl_easy_cleanup(curl);
+    return result;
 }
 
 }  // namespace
@@ -477,6 +616,77 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                       result.content.back().text = text.empty() ? "(empty directory)" : text;
                       return result;
                   }));
+
+    tools.push_back(make_tool(
+        "web_fetch", "Fetch a web page by URL and return its content as text.",
+        Json{{"type", "object"},
+             {"properties",
+              Json{{"url", Json{{"type", "string"},
+                                {"description", "Full http(s) URL to fetch"}}},
+                   {"max_chars", Json{{"type", "integer"},
+                                      {"description",
+                                       "Maximum characters to return (UTF-8 safe, default 20000, "
+                                       "max 100000)"}}},
+                   {"timeout_seconds", Json{{"type", "integer"},
+                                            {"description",
+                                             "Timeout in seconds (default 15, max 60)"}}}}},
+             {"required", Json::array({"url"})}},
+        [](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+        {
+            ToolResult result;
+            const auto fail = [&result](const std::string& message) -> ToolResult
+            {
+                result.content.push_back(ContentBlock{});
+                result.content.back().type = BlockType::Text;
+                result.content.back().text = "[web_fetch error] " + message;
+                return result;
+            };
+
+            // LLM 可能传错参数类型（nlohmann 的 get<type>() 会抛异常），整体兜底避免整轮失败
+            try
+            {
+                const std::string url = args.value("url", "");
+                const int max_chars =
+                    args.contains("max_chars") ? args["max_chars"].get<int>() : 20000;
+                const int timeout_seconds =
+                    args.contains("timeout_seconds") ? args["timeout_seconds"].get<int>() : 15;
+                // 上限兜底：防模型传超大值导致大额下载
+                const int char_cap = std::clamp(max_chars, 1, 100000);
+                // 下载上限按 UTF-8 最多 4 字节/字符放大，截断时再按字符边界精确裁剪
+                const size_t max_bytes = static_cast<size_t>(char_cap) * 4;
+                const auto fetched =
+                    fetch_url(url, std::clamp(timeout_seconds, 1, 60), max_bytes, signal);
+
+                std::string text;
+                if (!fetched.error.empty())
+                {
+                    text = "[web_fetch error] " + fetched.error;
+                }
+                else
+                {
+                    text = "status: " + std::to_string(fetched.statusCode);
+                    if (!fetched.contentType.empty())
+                    {
+                        text += "\ncontent-type: " + fetched.contentType;
+                    }
+                    const std::string body_text =
+                        truncate_utf8_chars(fetched.body, static_cast<size_t>(char_cap));
+                    text += "\n\n" + body_text;
+                    if (body_text.size() < fetched.body.size())
+                    {
+                        text += "\n[... truncated]";
+                    }
+                }
+                result.content.push_back(ContentBlock{});
+                result.content.back().type = BlockType::Text;
+                result.content.back().text = text.empty() ? "(empty response)" : text;
+                return result;
+            }
+            catch (const std::exception& e)
+            {
+                return fail(std::string("invalid arguments: ") + e.what());
+            }
+        }));
 
     return tools;
 }

@@ -46,7 +46,7 @@ const std::vector<CommandEntry>& builtin_command_entries()
         {"resume", "恢复最近会话"},
         {"sessions", "列出会话"},
         {"image", "图片输入"},
-        {"tools", "启用编码工具（read/bash/edit/write/grep/find/ls + subagent）"},
+        {"tools", "启用编码工具（read/bash/edit/write/grep/find/ls/web_fetch + subagent）"},
         {"skills", "列出 skills"},
         {"memory", "显示 picpp 进程当前及峰值内存"},
         {"quit", "退出"},
@@ -1115,7 +1115,7 @@ void Repl::handle_command(const std::string& line)
     if (name == "tools")
     {
         session_.set_tools(make_coding_tools(cwd_));
-        std::cout << "已启用编码工具：read/bash/edit/write/grep/find/ls" << std::endl;
+        std::cout << "已启用编码工具：read/bash/edit/write/grep/find/ls/web_fetch" << std::endl;
         return;
     }
 
