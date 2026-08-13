@@ -4,9 +4,6 @@
 
 #include <algorithm>
 
-#include "pi/ai/json_util.h"
-#include "pi/harness/session.h"
-
 namespace pi
 {
 
@@ -181,15 +178,12 @@ std::optional<Usage> get_assistant_usage(const AgentMessage& message)
     return std::nullopt;
 }
 
+/** 用最终组装的 prompt 文本发起摘要请求（调用方负责拼装完整 prompt）。 */
 Result<std::string, CompactionError> generate_summary_internal(
-    const std::vector<AgentMessage>& messages, const ModelInfo& model, int64_t maxTokens,
+    const std::string& promptText, const ModelInfo& model, int64_t maxTokens,
     const std::shared_ptr<TransportAdapter>& transport, const std::optional<std::string>& apiKey,
-    const std::shared_ptr<std::atomic<bool>>& signal, const std::string& promptBase,
-    const std::string& conversationText, std::optional<ThinkingLevel> thinkingLevel)
+    const std::shared_ptr<std::atomic<bool>>& signal, std::optional<ThinkingLevel> thinkingLevel)
 {
-    std::string prompt_text =
-        "<conversation>\n" + conversationText + "\n</conversation>\n\n" + promptBase;
-
     StreamRequestOptions opts;
     opts.apiKey = apiKey;
     opts.maxTokens = static_cast<int>(
@@ -200,7 +194,7 @@ Result<std::string, CompactionError> generate_summary_internal(
         thinkingLevel && *thinkingLevel != ThinkingLevel::Off ? thinkingLevel : std::nullopt;
 
     const Message result =
-        transport->complete_chat(model, {Message::user(std::move(prompt_text))}, opts);
+        transport->complete_chat(model, {Message::user(promptText)}, opts);
     if (result.stopReason == StopReason::Aborted)
     {
         return Result<std::string, CompactionError>::err_value(compaction_error(
@@ -715,14 +709,16 @@ Result<std::string, CompactionError> generate_summary(
         base_prompt += "\n\nAdditional focus: " + customInstructions;
     }
     const std::string conversation_text = serialize_conversation(currentMessages);
+    // 完整 prompt 在此一次性拼装（此前曾由 generate_summary_internal 再包一层
+    // <conversation>，导致对话内容在请求中出现两次）。
     std::string prompt_text = "<conversation>\n" + conversation_text + "\n</conversation>\n\n";
     if (!previousSummary.empty())
     {
         prompt_text += "<previous-summary>\n" + previousSummary + "\n</previous-summary>\n\n";
     }
     prompt_text += base_prompt;
-    return generate_summary_internal(currentMessages, model, max_tokens, transport, apiKey, signal,
-                                     prompt_text, conversation_text, thinkingLevel);
+    return generate_summary_internal(prompt_text, model, max_tokens, transport, apiKey, signal,
+                                     thinkingLevel);
 }
 
 Result<CompactionResult, CompactionError> compact(
@@ -766,8 +762,7 @@ Result<CompactionResult, CompactionError> compact(
         const std::string prompt_text = "<conversation>\n" + conversation_text +
                                         "\n</conversation>\n\n" + kTurnPrefixSummarizationPrompt;
         const auto prefix_result = generate_summary_internal(
-            preparation.turnPrefixMessages, model, max_tokens, transport, apiKey, signal,
-            prompt_text, conversation_text, thinkingLevel);
+            prompt_text, model, max_tokens, transport, apiKey, signal, thinkingLevel);
         if (!prefix_result.ok)
         {
             return Result<CompactionResult, CompactionError>::err_value(prefix_result.error);

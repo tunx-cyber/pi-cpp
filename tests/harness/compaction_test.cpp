@@ -2,9 +2,7 @@
 
 #include <gtest/gtest.h>
 
-#include <filesystem>
-
-#include "pi/harness/session.h"
+#include "test_utils/scripted_transport.h"
 
 namespace pi
 {
@@ -186,6 +184,70 @@ TEST(CompactionTest, SerializeConversation)
     EXPECT_NE(serialized.find("[User]: first question"), std::string::npos);
     EXPECT_NE(serialized.find("[Assistant]: the answer"), std::string::npos);
     EXPECT_NE(serialized.find("[Tool result]: ls output"), std::string::npos);
+}
+
+// ---------- 请求体级回归（用 ScriptedTransport 捕获实际发出的 prompt） ----------
+
+namespace
+{
+
+std::vector<AgentMessage> two_message_conversation()
+{
+    std::vector<AgentMessage> messages;
+    messages.push_back(Message::user("first question"));
+    AgentMessage assistant;
+    assistant.role = Role::Assistant;
+    assistant.stopReason = StopReason::Stop;
+    assistant.content.push_back(ContentBlock{});
+    assistant.content.back().type = BlockType::Text;
+    assistant.content.back().text = "the answer";
+    messages.push_back(assistant);
+    return messages;
+}
+
+}  // namespace
+
+TEST(CompactionTest, GenerateSummarySendsConversationExactlyOnce)
+{
+    // 回归：此前 generate_summary_internal 会再包一层 <conversation>，
+    // 导致对话内容在摘要请求中出现两次（token 翻倍）。
+    auto transport = std::make_shared<pi_test::ScriptedTransport>();
+    transport->add_turn(pi_test::text_turn("the summary"));
+
+    const auto result =
+        generate_summary(two_message_conversation(), pi_test::scripted_model(), 10000, transport,
+                         "test-key", nullptr);
+    ASSERT_TRUE(result.ok) << result.error.message;
+    EXPECT_EQ(result.value, "the summary");
+
+    const auto& received = transport->received_messages();
+    ASSERT_EQ(received.size(), 1u);
+    ASSERT_EQ(received[0].size(), 1u);
+    const std::string prompt = received[0][0].text_content();
+    EXPECT_EQ(prompt.find("[User]: first question"), prompt.rfind("[User]: first question"));
+    EXPECT_EQ(prompt.find("[Assistant]: the answer"), prompt.rfind("[Assistant]: the answer"));
+    EXPECT_NE(prompt.find("<conversation>"), std::string::npos);
+    EXPECT_NE(prompt.find("</conversation>"), std::string::npos);
+}
+
+TEST(CompactionTest, UpdateSummaryIncludesPreviousSummaryOnce)
+{
+    auto transport = std::make_shared<pi_test::ScriptedTransport>();
+    transport->add_turn(pi_test::text_turn("updated summary"));
+
+    const auto result = generate_summary({Message::user("new message")}, pi_test::scripted_model(),
+                                         10000, transport, "test-key", nullptr, "", "prior summary");
+    ASSERT_TRUE(result.ok) << result.error.message;
+
+    const auto& received = transport->received_messages();
+    ASSERT_EQ(received.size(), 1u);
+    const std::string prompt = received[0][0].text_content();
+    // 历史摘要正文只注入一次（<previous-summary> 标签名还会出现在 update 模板
+    // 的说明文字里，因此断言正文内容而不是标签）。
+    EXPECT_EQ(prompt.find("prior summary"), prompt.rfind("prior summary"));
+    // 增量摘要使用 update 模板而不是首次摘要模板
+    EXPECT_NE(prompt.find("UPDATE"), std::string::npos);
+    EXPECT_EQ(prompt.find("context checkpoint"), std::string::npos);
 }
 
 }  // namespace
