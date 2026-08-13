@@ -1,10 +1,11 @@
 #pragma once
 
+#include <termios.h>
+
 #include <condition_variable>
 
 #include <atomic>
 #include <deque>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -74,7 +75,7 @@ class Repl
     size_t cursor_ = 0;
     bool streaming_ = false;
     bool quit_requested_ = false;
-    bool run_active_ = false;
+    struct termios original_termios_;  // 进入 raw mode 前的终端设置，退出时完整恢复
 
     // 历史记录
     std::vector<std::string> history_;
@@ -87,6 +88,7 @@ class Repl
     std::deque<UiEvent> event_queue_;
     int event_pipe_[2] = {-1, -1};
     std::thread worker_;
+    std::atomic<bool> run_finished_{true};  // worker 收尾标志（退出路径用于提示用户）
 
     // 渲染状态
     int64_t total_input_tokens_ = 0;

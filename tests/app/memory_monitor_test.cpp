@@ -10,7 +10,7 @@ namespace
 TEST(MemoryMonitorTest, ParsesLinuxProcessStatus)
 {
     const auto usage = parse_proc_status_memory(
-        "Name:\tpi_repl\nVmSize:\t  24576 kB\nVmRSS:\t   4096 kB\nThreads:\t4\n");
+        "Name:\tpicpp\nVmSize:\t  24576 kB\nVmRSS:\t   4096 kB\nThreads:\t4\n");
 
     EXPECT_TRUE(usage.hasResident);
     EXPECT_TRUE(usage.hasVirtual);

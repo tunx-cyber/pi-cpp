@@ -1,11 +1,13 @@
 #pragma once
 
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "pi/app/settings.h"
 #include "pi/harness/agent_harness.h"
+#include "pi/harness/env.h"
 #include "pi/harness/jsonl_repo.h"
 
 namespace pi
@@ -38,7 +40,7 @@ class AgentSession
     void set_model(const std::string& modelId);
     /** 切换 thinking（按 cwd 持久化）。 */
     void set_thinking(ThinkingLevel level);
-    bool compact(bool force = false, std::string* errorOut = nullptr);
+    bool compact(std::string* errorOut = nullptr);
 
     std::vector<SessionMetadata> list_sessions() const;
 
@@ -46,9 +48,10 @@ class AgentSession
     ModelInfo model() const;
     ThinkingLevel thinking_level() const;
     std::string system_prompt() const;
-    double total_cost() const { return total_cost_; }
-    double all_time_cost() const { return all_time_cost_; }
-    const Usage& last_turn_usage() const { return last_turn_usage_; }
+    // 成本/用量由 run 线程（监听器）写、UI 线程读，统一经 cost_mutex_ 保护。
+    double total_cost() const;
+    double all_time_cost() const;
+    Usage last_turn_usage() const;
     const std::string& cwd() const { return cwd_; }
     Session& session() { return harness_.session(); }
     AgentHarness& harness() { return harness_; }
@@ -64,6 +67,7 @@ class AgentSession
     PosixFileSystem fs_;
     JsonlSessionRepo repo_;
     AgentHarness harness_;
+    mutable std::mutex cost_mutex_;  // 保护 total_cost_/all_time_cost_/last_turn_usage_
     double total_cost_ = 0;
     double all_time_cost_ = 0;
     Usage last_turn_usage_;

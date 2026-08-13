@@ -7,7 +7,7 @@
 namespace pi
 {
 
-/** 当前 pi_repl 进程的内存快照。不可用的字段以 false 标记。 */
+/** 当前 picpp 进程的内存快照。不可用的字段以 false 标记。 */
 struct ProcessMemoryUsage
 {
     uint64_t residentBytes = 0;

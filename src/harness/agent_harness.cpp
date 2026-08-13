@@ -36,6 +36,7 @@ AgentHarness::AgentHarness(AgentHarnessOptions options)
                 event.message.stopReason != StopReason::Error &&
                 event.message.stopReason != StopReason::Aborted)
             {
+                std::lock_guard<std::mutex> lock(cost_mutex_);
                 total_cost_ += event.message.usage.cost.total;
             }
         });
@@ -118,6 +119,7 @@ void AgentHarness::wait_for_idle() { agent_.wait_for_idle(); }
 void AgentHarness::reset()
 {
     agent_.reset();
+    std::lock_guard<std::mutex> lock(cost_mutex_);
     total_cost_ = 0;
 }
 
@@ -163,7 +165,7 @@ void AgentHarness::maybe_auto_compact()
     if (!should_compact(estimate.tokens, model_.contextWindow, compaction_settings_)) return;
 
     std::string error;
-    compact(false, &error);
+    compact(&error);
 }
 
 Result<std::string, CompactionError> AgentHarness::run_compaction()
@@ -220,9 +222,8 @@ Result<std::string, CompactionError> AgentHarness::run_compaction()
     return Result<std::string, CompactionError>::ok_value(result.value.summary);
 }
 
-bool AgentHarness::compact(bool force, std::string* errorOut)
+bool AgentHarness::compact(std::string* errorOut)
 {
-    (void)force;
     const auto result = run_compaction();
     if (!result.ok)
     {

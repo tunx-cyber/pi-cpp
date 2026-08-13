@@ -100,6 +100,8 @@ int main(int argc, char** argv)
             }
         }
         session.prompt(prompt, image_blocks);
+        // 管道模式退出前清理 bash 工具遗留的子进程（进程组）
+        pi::PosixShell::kill_all_children();
         return 0;
     }
 

@@ -15,10 +15,8 @@
 #include <optional>
 #include <sstream>
 
-#include "pi/ai/model_registry.h"
-#include "pi/app/repl.h"
+#include "pi/harness/env.h"
 #include "pi/harness/prompt_templates.h"
-#include "pi/harness/skills.h"
 
 namespace pi
 {
@@ -162,7 +160,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                                  {"maxLines", Json{{"type", "integer"},
                                                    {"description", "Cap on lines returned"}}}}},
              {"required", Json::array({"path"})}},
-        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
+        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
             const auto resolved = workspace_path(cwd, args.value("path", ""), false, workspace);
             const std::string path = resolved.value_or("");
@@ -185,6 +183,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
             std::string line;
             while (std::getline(file, line))
             {
+                // 长文件读取响应 abort（Ctrl+C/Esc）
+                if (signal && signal->load()) break;
                 lines.push_back(line);
                 if (lines.size() >= 100000) break;
             }
@@ -342,7 +342,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                                                {"description", "File or directory to search"}}},
                                  {"maxResults", Json{{"type", "integer"}}}}},
              {"required", Json::array({"pattern"})}},
-        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
+        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
             const auto resolved = workspace_path(cwd, args.value("path", workspace), false, workspace);
             const std::string path = resolved.value_or("");
@@ -359,6 +359,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                 while ((entry = readdir(d)) != nullptr &&
                        static_cast<int>(matches.size()) < max_results)
                 {
+                    // 目录遍历响应 abort（Ctrl+C/Esc）：返回已收集的部分结果
+                    if (signal && signal->load()) break;
                     const std::string name = entry->d_name;
                     if (name == "." || name == ".." || name == ".git" || name == "build" ||
                         name == "node_modules")
@@ -378,6 +380,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                     while (std::getline(file, line) &&
                            static_cast<int>(matches.size()) < max_results)
                     {
+                        if (signal && signal->load()) break;
                         ++line_number;
                         if (line.find(pattern) != std::string::npos)
                         {
@@ -427,7 +430,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
              {"properties",
               Json{{"path", Json{{"type", "string"}}}, {"maxResults", Json{{"type", "integer"}}}}},
              {"required", Json::array()}},
-        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
+        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
             const auto resolved = workspace_path(cwd, args.value("path", workspace), false, workspace);
             const std::string path = resolved.value_or("");
@@ -445,6 +448,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                 while ((entry = readdir(d)) != nullptr &&
                        static_cast<int>(files.size()) < max_results)
                 {
+                    // 目录遍历响应 abort（Ctrl+C/Esc）
+                    if (signal && signal->load()) break;
                     const std::string name = entry->d_name;
                     if (name == "." || name == ".." || name == ".git" || name == "build" ||
                         name == "node_modules")

@@ -1,8 +1,8 @@
 #pragma once
 
-#include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -55,8 +55,8 @@ class AgentHarness
     void set_thinking_level(ThinkingLevel level);
     void set_tools(std::vector<AgentTool> tools);
 
-    /** 手动压缩（/compact）：force=true 即使未达阈值也压缩。 */
-    bool compact(bool force = false, std::string* errorOut = nullptr);
+    /** 手动压缩（/compact）：threshold 检查只发生在 maybe_auto_compact，此处总是执行。 */
+    bool compact(std::string* errorOut = nullptr);
 
     std::vector<AgentMessage> messages() const;
     std::vector<AgentTool> tools() const;
@@ -67,7 +67,12 @@ class AgentHarness
     const Session& session() const { return session_; }
 
     std::function<void()> subscribe(AgentEventListener listener);
-    double total_cost() const { return total_cost_; }
+    /** 会话累计成本。run 线程（监听器）写、UI 线程读，由 cost_mutex_ 保护。 */
+    double total_cost() const
+    {
+        std::lock_guard<std::mutex> lock(cost_mutex_);
+        return total_cost_;
+    }
 
    private:
     std::string build_system_prompt() const;
@@ -85,6 +90,7 @@ class AgentHarness
     ModelInfo model_;
     ThinkingLevel thinking_level_;
     CompactionSettings compaction_settings_;
+    mutable std::mutex cost_mutex_;  // 保护 total_cost_（跨线程读写）
     double total_cost_ = 0;
     bool resumed_ = false;
 };

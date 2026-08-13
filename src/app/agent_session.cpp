@@ -11,6 +11,22 @@ namespace pi
 namespace
 {
 
+/** 未知模型的兜底定义（用户自定义端点场景），镜像 pi 的 custom model 构造。 */
+ModelInfo make_custom_model(const std::string& model_id, const std::string& base_url)
+{
+    ModelInfo custom;
+    custom.id = model_id;
+    custom.name = model_id;
+    custom.api = "openai-completions";
+    custom.provider = "custom";
+    custom.baseUrl = base_url;
+    custom.reasoning = false;
+    custom.input = {"text", "image"};
+    custom.contextWindow = 131072;
+    custom.maxTokens = 32768;
+    return custom;
+}
+
 AgentHarnessOptions build_harness_options(const Settings& settings, const std::string& cwd)
 {
     AgentHarnessOptions options;
@@ -19,24 +35,13 @@ AgentHarnessOptions build_harness_options(const Settings& settings, const std::s
     {
         if (override->model) model_id = *override->model;
     }
-    const auto model = get_model(model_id);
-    if (model)
+    if (const auto model = get_model(model_id))
     {
         options.model = *model;
     }
     else
     {
-        ModelInfo custom;
-        custom.id = model_id;
-        custom.name = model_id;
-        custom.api = "openai-completions";
-        custom.provider = "custom";
-        custom.baseUrl = settings.baseUrl;
-        custom.reasoning = false;
-        custom.input = {"text", "image"};
-        custom.contextWindow = 131072;
-        custom.maxTokens = 32768;
-        options.model = custom;
+        options.model = make_custom_model(model_id, settings.baseUrl);
     }
     options.thinkingLevel = settings.thinking;
     options.transport = make_openai_completions_transport(settings.baseUrl, settings.apiKey);
@@ -65,6 +70,7 @@ AgentSession::AgentSession(Settings settings, std::string cwd)
                 event.message.stopReason != StopReason::Error &&
                 event.message.stopReason != StopReason::Aborted)
             {
+                std::lock_guard<std::mutex> lock(cost_mutex_);
                 total_cost_ += event.message.usage.cost.total;
                 all_time_cost_ += event.message.usage.cost.total;
                 last_turn_usage_ = event.message.usage;
@@ -85,20 +91,8 @@ ModelInfo AgentSession::resolve_model() const
     {
         if (override->model) model_id = *override->model;
     }
-    const auto model = get_model(model_id);
-    if (model) return *model;
-    // 未知模型：构造自定义模型（用户端点场景）
-    ModelInfo custom;
-    custom.id = model_id;
-    custom.name = model_id;
-    custom.api = "openai-completions";
-    custom.provider = "custom";
-    custom.baseUrl = settings_.baseUrl;
-    custom.reasoning = false;
-    custom.input = {"text", "image"};
-    custom.contextWindow = 131072;
-    custom.maxTokens = 32768;
-    return custom;
+    if (const auto model = get_model(model_id)) return *model;
+    return make_custom_model(model_id, settings_.baseUrl);
 }
 
 void AgentSession::new_session()
@@ -108,6 +102,7 @@ void AgentSession::new_session()
     harness_.session() = created.value;
     harness_.set_model(resolve_model());
     harness_.set_thinking_level(settings_.thinking);
+    std::lock_guard<std::mutex> lock(cost_mutex_);
     total_cost_ = 0;
     last_turn_usage_ = Usage{};
 }
@@ -156,8 +151,27 @@ void AgentSession::abort() { harness_.abort(); }
 void AgentSession::reset()
 {
     harness_.reset();
+    std::lock_guard<std::mutex> lock(cost_mutex_);
     total_cost_ = 0;
     last_turn_usage_ = Usage{};
+}
+
+double AgentSession::total_cost() const
+{
+    std::lock_guard<std::mutex> lock(cost_mutex_);
+    return total_cost_;
+}
+
+double AgentSession::all_time_cost() const
+{
+    std::lock_guard<std::mutex> lock(cost_mutex_);
+    return all_time_cost_;
+}
+
+Usage AgentSession::last_turn_usage() const
+{
+    std::lock_guard<std::mutex> lock(cost_mutex_);
+    return last_turn_usage_;
 }
 
 bool AgentSession::is_busy() const { return harness_.is_busy(); }
@@ -207,9 +221,9 @@ void AgentSession::set_thinking(ThinkingLevel level)
     harness_.set_thinking_level(level);
 }
 
-bool AgentSession::compact(bool force, std::string* errorOut)
+bool AgentSession::compact(std::string* errorOut)
 {
-    return harness_.compact(force, errorOut);
+    return harness_.compact(errorOut);
 }
 
 std::vector<SessionMetadata> AgentSession::list_sessions() const

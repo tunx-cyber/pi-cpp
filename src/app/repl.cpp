@@ -68,6 +68,17 @@ std::string join_thinking_levels(const std::vector<ThinkingLevel>& levels)
     return out;
 }
 
+/** 带超时的单字节读取。raw mode 下裸按 Esc 只有 1 字节，直接阻塞读后续字节会挂起 UI。 */
+bool read_byte_with_timeout(char& out, int timeout_ms)
+{
+    struct pollfd pfd
+    {
+        STDIN_FILENO, POLLIN, 0
+    };
+    if (poll(&pfd, 1, timeout_ms) <= 0) return false;
+    return read(STDIN_FILENO, &out, 1) == 1;
+}
+
 }  // namespace
 
 Repl::Repl(AgentSession& session, std::string cwd)
@@ -215,8 +226,15 @@ int Repl::run()
 
     session_.abort();
     PosixShell::kill_all_children();
-    if (worker_.joinable()) worker_.join();
+    // 先恢复终端再 join：worker 可能还在等长任务工具收尾（尽管工具已响应 abort）。
+    // 终端回到 cooked 模式后，此后的 Ctrl+C 会以 SIGINT 直接终止进程，
+    // 用户不会被卡在 raw mode（raw mode 下 ISIG 关闭，Ctrl+C 是死键）。
     restore_raw_mode();
+    if (worker_.joinable() && !run_finished_.load())
+    {
+        std::cout << "(等待运行中的任务结束，Ctrl+C 可立即退出)" << std::endl;
+    }
+    if (worker_.joinable()) worker_.join();
     return 0;
 }
 
@@ -247,8 +265,8 @@ void Repl::print_status()
 
 void Repl::enter_raw_mode()
 {
-    struct termios raw;
-    tcgetattr(STDIN_FILENO, &raw);
+    tcgetattr(STDIN_FILENO, &original_termios_);
+    struct termios raw = original_termios_;
     raw.c_lflag &= ~(ECHO | ICANON | ISIG);
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
@@ -257,10 +275,8 @@ void Repl::enter_raw_mode()
 
 void Repl::restore_raw_mode()
 {
-    struct termios cooked;
-    tcgetattr(STDIN_FILENO, &cooked);
-    cooked.c_lflag |= (ECHO | ICANON | ISIG);
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &cooked);
+    // 恢复进入 raw mode 前的完整终端设置（含 IXON 等自定义项），而不是重建近似值
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_termios_);
     std::cout << "\r\n";
 }
 
@@ -298,12 +314,11 @@ void Repl::handle_input()
                 }
                 break;
             }
-            case 3:  // Ctrl+C → 确认退出
-                if (line_buffer_.empty())
+            case 3:  // Ctrl+C → 确认退出（流式中始终生效，不要求输入行已清空）
                 {
                     std::cout << "\r\n(退出确认：再按 Ctrl+C 退出，其他键取消)" << std::endl;
                     char next;
-                    if (read(STDIN_FILENO, &next, 1) == 1 && next == 3)
+                    if (read_byte_with_timeout(next, 1000) && next == 3)
                     {
                         quit_requested_ = true;
                         session_.abort();
@@ -326,9 +341,9 @@ void Repl::handle_input()
             quit_requested_ = true;
             break;
         case 27:
-        {  // Esc 序列
+        {  // Esc 序列（后续字节带超时读取，裸按 Esc 不再挂起 UI）
             char seq[2];
-            if (read(STDIN_FILENO, &seq[0], 1) == 1 && read(STDIN_FILENO, &seq[1], 1) == 1)
+            if (read_byte_with_timeout(seq[0], 50) && read_byte_with_timeout(seq[1], 50))
             {
                 if (seq[0] == '[' && seq[1] == 'D' && cursor_ > 0)
                 {  // 左方向键
@@ -501,7 +516,7 @@ void Repl::handle_command(const std::string& line)
             }
             else
             {
-                std::cout << "取值：off/low/medium/high/xhigh；当前模型 "
+                std::cout << "取值：off/minimal/low/medium/high/xhigh；当前模型 "
                           << session_.model().id << " 支持："
                           << join_thinking_levels(get_supported_thinking_levels(session_.model()))
                           << std::endl;
@@ -516,7 +531,7 @@ void Repl::handle_command(const std::string& line)
     if (name == "compact")
     {
         std::string error;
-        if (session_.compact(true, &error))
+        if (session_.compact(&error))
         {
             std::cout << "已压缩会话" << std::endl;
         }
@@ -643,7 +658,7 @@ std::string Repl::help_text()
            "  /image <path> 图片输入\n"
            "  /tools       启用编码工具（read/bash/edit/write/grep/find/ls）\n"
            "  /skills      列出 skills\n"
-           "  /memory      显示 pi_repl 进程当前及峰值内存\n"
+           "  /memory      显示 picpp 进程当前及峰值内存\n"
            "  /quit        退出\n"
            "用户模板：~/.pi-cpp/templates/<name>.md → /<name> 参数\n"
            "流式中：Enter=steer Esc=abort Ctrl+C=退出（确认）Ctrl+P=切模型 Ctrl+L=重绘\n";
@@ -679,7 +694,7 @@ void Repl::request_abort()
 void Repl::start_run(const std::string& line)
 {
     streaming_ = true;
-    run_active_ = true;
+    run_finished_.store(false);
 
     worker_ = std::thread(
         [this, line]
@@ -694,6 +709,7 @@ void Repl::start_run(const std::string& line)
                                 ""});
                 enqueue(UiEvent{UiEvent::Type::RunEnd, "", "", ""});
             }
+            run_finished_.store(true);
         });
 }
 
@@ -780,7 +796,6 @@ void Repl::drain_events()
             case UiEvent::Type::RunEnd:
                 if (worker_.joinable()) worker_.join();
                 streaming_ = false;
-                run_active_ = false;
                 if (session_.last_turn_usage().totalTokens > 0)
                 {
                     std::cout << "\r\n" << format_usage_line(session_.last_turn_usage())
