@@ -436,6 +436,34 @@ std::string generate_entry_id(const std::map<std::string, size_t>& by_id)
 
 }  // namespace
 
+JsonlSessionStorage::JsonlSessionStorage(JsonlSessionStorage&& other) noexcept
+    : fs_(other.fs_),
+      file_path_(std::move(other.file_path_)),
+      metadata_(std::move(other.metadata_)),
+      entries_(std::move(other.entries_)),
+      by_id_(std::move(other.by_id_)),
+      labels_by_id_(std::move(other.labels_by_id_)),
+      current_leaf_id_(std::move(other.current_leaf_id_))
+{
+    // mutex_ 不随对象移动：新对象持有一把全新的锁。
+    // 移动只发生在存储被共享（shared_ptr）之前，因此不涉及并发持锁对象搬迁。
+}
+
+JsonlSessionStorage& JsonlSessionStorage::operator=(JsonlSessionStorage&& other) noexcept
+{
+    if (this != &other)
+    {
+        fs_ = other.fs_;
+        file_path_ = std::move(other.file_path_);
+        metadata_ = std::move(other.metadata_);
+        entries_ = std::move(other.entries_);
+        by_id_ = std::move(other.by_id_);
+        labels_by_id_ = std::move(other.labels_by_id_);
+        current_leaf_id_ = std::move(other.current_leaf_id_);
+    }
+    return *this;
+}
+
 Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& fs,
                                                                     const std::string& path)
 {
@@ -488,6 +516,8 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
     storage.metadata_.path = path;
     storage.metadata_.parentSessionPath = header.value("parentSession", "");
 
+    // 已解析成功的部分（用于尾行损坏时的截断修复）
+    std::string valid_prefix = lines[0] + "\n";
     for (size_t i = 1; i < lines.size(); ++i)
     {
         Json json;
@@ -497,6 +527,21 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
         }
         catch (...)
         {
+            // 尾行损坏容忍：最后一条非空行不是合法 JSON，多为进程在追加中途被
+            // 强杀（Ctrl+C/SIGKILL）留下的半行。截断到最后一个完整行并写回，
+            // 保证会话可恢复打开；文件中部的损坏仍然拒绝（那才是真正的数据问题）。
+            if (i + 1 == lines.size())
+            {
+                const auto repaired = fs.write_file(path, valid_prefix);
+                if (!repaired.ok)
+                {
+                    return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
+                        SessionErrorCode::Storage,
+                        "Failed to repair truncated session " + path + ": " +
+                            repaired.error.message));
+                }
+                break;
+            }
             return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
                 SessionErrorCode::InvalidEntry, "Invalid JSONL session file " + path + ": line " +
                                                     std::to_string(i + 1) + " is not valid JSON"));
@@ -531,6 +576,7 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
                                                     std::to_string(i + 1) +
                                                     " references an unknown leaf target"));
         }
+        valid_prefix += lines[i] + "\n";
         storage.entries_.push_back(entry);
         storage.by_id_[entry.id] = storage.entries_.size() - 1;
         if (entry.type == SessionTreeEntry::Type::Label && !entry.label.empty())
@@ -587,6 +633,7 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::create(
 
 Result<std::string, SessionError> JsonlSessionStorage::get_leaf_id() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!current_leaf_id_.empty() && by_id_.find(current_leaf_id_) == by_id_.end())
     {
         return Result<std::string, SessionError>::err_value(session_error(
@@ -597,6 +644,7 @@ Result<std::string, SessionError> JsonlSessionStorage::get_leaf_id() const
 
 Result<void, SessionError> JsonlSessionStorage::set_leaf_id(const std::string& leafId)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!leafId.empty() && by_id_.find(leafId) == by_id_.end())
     {
         return Result<void, SessionError>::err_value(
@@ -608,14 +656,35 @@ Result<void, SessionError> JsonlSessionStorage::set_leaf_id(const std::string& l
     entry.parentId = current_leaf_id_;
     entry.timestamp = iso_timestamp();
     entry.leafTargetId = leafId;
-    const auto append = append_entry(entry);
+    const auto append = append_entry_locked(std::move(entry));
     if (!append.ok) return Result<void, SessionError>::err_value(append.error);
     return Result<void, SessionError>::ok_value();
 }
 
-std::string JsonlSessionStorage::create_entry_id() { return generate_entry_id(by_id_); }
+std::string JsonlSessionStorage::create_entry_id()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generate_entry_id(by_id_);
+}
 
 Result<void, SessionError> JsonlSessionStorage::append_entry(SessionTreeEntry entry)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return append_entry_locked(std::move(entry));
+}
+
+Result<std::string, SessionError> JsonlSessionStorage::append_child(SessionTreeEntry entry)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    entry.id = generate_entry_id(by_id_);
+    entry.parentId = current_leaf_id_;
+    entry.timestamp = iso_timestamp();
+    const auto append = append_entry_locked(std::move(entry));
+    if (!append.ok) return Result<std::string, SessionError>::err_value(append.error);
+    return Result<std::string, SessionError>::ok_value(entries_.back().id);
+}
+
+Result<void, SessionError> JsonlSessionStorage::append_entry_locked(SessionTreeEntry entry)
 {
     if (entry.id.empty() || by_id_.find(entry.id) != by_id_.end())
     {
@@ -664,6 +733,7 @@ Result<void, SessionError> JsonlSessionStorage::append_entry(SessionTreeEntry en
 Result<std::optional<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_entry(
     const std::string& id) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto it = by_id_.find(id);
     if (it == by_id_.end())
         return Result<std::optional<SessionTreeEntry>, SessionError>::ok_value(std::nullopt);
@@ -673,6 +743,7 @@ Result<std::optional<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_e
 Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::find_entries(
     SessionTreeEntry::Type type) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<SessionTreeEntry> found;
     for (const auto& entry : entries_)
     {
@@ -684,6 +755,7 @@ Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::find_en
 Result<std::optional<std::string>, SessionError> JsonlSessionStorage::get_label(
     const std::string& id) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto it = labels_by_id_.find(id);
     if (it == labels_by_id_.end())
         return Result<std::optional<std::string>, SessionError>::ok_value(std::nullopt);
@@ -693,6 +765,7 @@ Result<std::optional<std::string>, SessionError> JsonlSessionStorage::get_label(
 Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_path_to_root(
     const std::string& leafId) const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::vector<SessionTreeEntry> path;
     if (leafId.empty()) return Result<std::vector<SessionTreeEntry>, SessionError>::ok_value(path);
     std::string current = leafId;
@@ -721,6 +794,7 @@ Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_pat
 
 Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_entries() const
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     return Result<std::vector<SessionTreeEntry>, SessionError>::ok_value(entries_);
 }
 
@@ -893,16 +967,9 @@ Result<std::string, SessionError> Session::append_typed_entry(SessionTreeEntry e
     if (!storage_)
         return Result<std::string, SessionError>::err_value(
             session_error(SessionErrorCode::Unknown, "no storage"));
-    entry.id = storage_->create_entry_id();
-    const auto leaf = storage_->get_leaf_id();
-    if (!leaf.ok) return Result<std::string, SessionError>::err_value(leaf.error);
-    entry.parentId = leaf.value;
-    entry.timestamp = iso_timestamp();
-    const auto append = storage_->append_entry(std::move(entry));
-    if (!append.ok) return Result<std::string, SessionError>::err_value(append.error);
-    const auto& entries = storage_->get_entries();
-    return Result<std::string, SessionError>::ok_value(
-        entries.value.empty() ? "" : entries.value.back().id);
+    // append_child 在存储内部一次加锁完成 id 分配、parent 挂接与落盘，
+    // 保证 UI 线程（切换命令）与 run 线程（消息持久化）并发追加时历史链保持线性。
+    return storage_->append_child(std::move(entry));
 }
 
 Result<std::string, SessionError> Session::append_message(const AgentMessage& message)

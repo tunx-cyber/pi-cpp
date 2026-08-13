@@ -106,7 +106,9 @@ Result<Session, SessionError> JsonlSessionRepo::create(
     }
     const auto file_path = create_session_file_path(cwd, id, createdAt);
     if (!file_path.ok) return Result<Session, SessionError>::err_value(file_path.error);
-    const auto storage =
+    // 注意：storage 不能声明为 const，否则 std::move 得到 const 右值，
+    // 无法绑定移动构造（拷贝构造已被禁用）。
+    auto storage =
         JsonlSessionStorage::create(fs_, file_path.value, cwd, id, parentSessionPath.value_or(""));
     if (!storage.ok) return Result<Session, SessionError>::err_value(storage.error);
     return Result<Session, SessionError>::ok_value(
@@ -126,7 +128,7 @@ Result<Session, SessionError> JsonlSessionRepo::open(const SessionMetadata& meta
         return Result<Session, SessionError>::err_value(
             session_error(SessionErrorCode::NotFound, "Session not found: " + metadata.path));
     }
-    const auto storage = JsonlSessionStorage::open(fs_, metadata.path);
+    auto storage = JsonlSessionStorage::open(fs_, metadata.path);
     if (!storage.ok) return Result<Session, SessionError>::err_value(storage.error);
     return Result<Session, SessionError>::ok_value(
         Session(std::make_shared<JsonlSessionStorage>(std::move(storage.value))));

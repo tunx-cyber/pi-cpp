@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 
+#include <mutex>
 #include <random>
 
 namespace pi
@@ -44,6 +45,11 @@ void format_uuid(const unsigned char bytes[16], std::string& out)
 
 std::string uuidv7()
 {
+    // 内部状态（上次时间戳/序列号/随机引擎）非线程安全：
+    // 会话条目 id 会从 run 线程与 UI 线程并发生成，必须整体串行化。
+    static std::mutex generation_mutex;
+    std::lock_guard<std::mutex> lock(generation_mutex);
+
     static int64_t last_timestamp = 0;
     static uint32_t sequence = 0;
 

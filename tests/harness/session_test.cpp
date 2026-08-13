@@ -4,8 +4,10 @@
 
 #include <cstdio>
 
+#include <atomic>
 #include <filesystem>
 #include <string>
+#include <thread>
 
 #include "pi/harness/env.h"
 #include "pi/harness/jsonl_repo.h"
@@ -181,6 +183,77 @@ TEST_F(SessionTest, RepoCreateUsesCwdEncoding)
     const auto others = repo.list("/other/path");
     ASSERT_TRUE(others.ok);
     EXPECT_TRUE(others.value.empty());
+}
+
+TEST_F(SessionTest, TruncatedTailLineIsRepairedOnOpen)
+{
+    // 回归：进程在追加中途被强杀（Ctrl+C/SIGKILL）会留下半行 JSON。
+    // open 应截断到最后一个完整行并写回，而不是让整个会话打不开。
+    JsonlSessionRepo repo(*fs_, root_ + "/sessions");
+    const auto created = repo.create(root_);
+    ASSERT_TRUE(created.ok);
+    auto session = created.value;
+    const auto id = session.append_message(Message::user("hello"));
+    ASSERT_TRUE(id.ok);
+
+    const std::string path = session.metadata().path;
+    const auto appended = fs_->append_file(path, "{\"type\":\"mess");
+    ASSERT_TRUE(appended.ok);
+
+    const auto reopened = repo.open(session.metadata());
+    ASSERT_TRUE(reopened.ok) << reopened.error.message;
+    const auto context = reopened.value.build_context();
+    ASSERT_TRUE(context.ok);
+    ASSERT_EQ(context.value.messages.size(), 1u);
+    EXPECT_EQ(context.value.messages[0].text_content(), "hello");
+
+    // 半行已被截断移除
+    const auto content = fs_->read_text_file(path);
+    ASSERT_TRUE(content.ok);
+    EXPECT_EQ(content.value.find("{\"type\":\"mess"), std::string::npos);
+}
+
+TEST_F(SessionTest, ConcurrentAppendsKeepLinearHistory)
+{
+    // 回归：REPL 中 UI 线程（/model 等切换）与 run 线程（消息持久化）会并发追加，
+    // 存储必须保证历史链线性无分叉（并发下曾出现孤儿分支 + JSONL 行交错损坏）。
+    JsonlSessionRepo repo(*fs_, root_ + "/sessions");
+    const auto created = repo.create(root_);
+    ASSERT_TRUE(created.ok);
+    auto session = created.value;
+
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 50;
+    std::vector<std::thread> threads;
+    std::atomic<int> failures{0};
+    for (int t = 0; t < kThreads; ++t)
+    {
+        threads.emplace_back(
+            [&session, t, &failures]
+            {
+                for (int i = 0; i < kPerThread; ++i)
+                {
+                    const auto id = session.append_message(
+                        Message::user("t" + std::to_string(t) + "-" + std::to_string(i)));
+                    if (!id.ok) failures.fetch_add(1);
+                }
+            });
+    }
+    for (auto& thread : threads) thread.join();
+    EXPECT_EQ(failures.load(), 0);
+
+    // 重新打开：条目数一致，且父子链全程线性（每条 parentId == 前一条 id）
+    const auto reopened = repo.open(session.metadata());
+    ASSERT_TRUE(reopened.ok) << reopened.error.message;
+    const auto branch = reopened.value.get_branch();
+    ASSERT_TRUE(branch.ok) << branch.error.message;
+    ASSERT_EQ(branch.value.size(), static_cast<size_t>(kThreads * kPerThread));
+    std::string prev_id;
+    for (const auto& entry : branch.value)
+    {
+        if (!prev_id.empty()) EXPECT_EQ(entry.parentId, prev_id);
+        prev_id = entry.id;
+    }
 }
 
 }  // namespace
