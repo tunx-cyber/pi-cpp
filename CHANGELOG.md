@@ -27,6 +27,8 @@
 
 ### 文档 / 测试
 
+- **CI（GitHub Actions）**：`.github/workflows/ci.yml` 新增 macOS 14 + Ubuntu 24.04 双平台矩阵（构建 + 单测 + tsan），push/PR 自动触发；Linux 支持由此固化。
+- README 新增平台支持矩阵（macOS ✅ / Linux ✅ CI / Windows ❌ 建议 WSL）；TECHNICAL.md 补充平台范围与 CI 说明。
 - TECHNICAL.md §5.3 重写（键盘协议、命令菜单、多行输入、TCSANOW 注意事项），§4.2 补 compaction 空摘要语义，维护清单补 REPL pty 冒烟项。
 - 新增 compaction 回归测试（无可摘要消息 → nullopt；split-turn 切点检测）。全套 118 用例，tsan 0 警告。
 - pty 冒烟（脚本驱动）：菜单/过滤/Tab 补全/Shift+Enter/Ctrl+J/中文/CSI-u 提交/空闲 Ctrl+C 退出，全部通过。

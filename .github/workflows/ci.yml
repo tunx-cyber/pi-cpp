@@ -1,0 +1,58 @@
+name: CI
+
+# macOS + Linux 双平台：常规构建/单测 + ThreadSanitizer 全量单测。
+# Windows 原生构建暂不支持（REPL/Shell 依赖 POSIX），Windows 用户请用 WSL。
+# 每次 push/PR 触发；依赖（nlohmann-json/openai-cpp/valijson/stb/googletest）
+# 由 FetchContent 自动下载。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    name: 构建与单测（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖（Ubuntu）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libcurl4-openssl-dev
+
+      - name: 配置
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: 构建
+        run: cmake --build build
+
+      - name: 单测
+        run: ./build/pi_tests
+
+  tsan:
+    name: ThreadSanitizer（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装依赖（Ubuntu）
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libcurl4-openssl-dev
+
+      - name: 配置（tsan）
+        run: cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread"
+
+      - name: 构建（tsan）
+        run: cmake --build build-tsan
+
+      - name: 单测（tsan）
+        run: ./build-tsan/pi_tests

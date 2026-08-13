@@ -332,6 +332,7 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 
 ## 10. 已知裁剪与差异
 
+0. **平台范围**：macOS 与 Linux（POSIX）。Windows 原生不支持——REPL（termios/poll）与 Shell（fork/exec、/bin/sh）依赖 POSIX，Windows 用户请用 WSL；`FileSystem`/`Shell` 已是接口（env.h），未来若需原生 Windows 支持可新增 `WindowsShell`/Console 后端而不动上层。
 1. **单 provider**：仅 OpenAI-completions wire（deepseek 端点），无 OAuth/浏览器代理/多 provider/图片生成。
 2. **传输实现**：openai-cpp 库（而非自写 curl SSE），`thinking`/`reasoning_content` 等 deepseek 专有字段经 body augmenter 注入。
 3. **AgentHarness 裁剪**：无完整事件 hook 系统（before_agent_start/before_provider_request 等），保留消息持久化 + 自动压缩 + 模型/thinking 恢复。
@@ -360,6 +361,8 @@ cmake --build build-tsan && ./build-tsan/pi_tests
 ```
 
 代码风格：`.clang-format`（Google 基础 + Allman 大括号 + 4 空格缩进 + 100 列 + include regroup），`clang-format -i $(find include src apps tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h')`。
+
+**CI**：`.github/workflows/ci.yml` 在 push/PR 时跑 macOS 14 与 Ubuntu 24.04 双平台矩阵（构建 + 单测 + tsan 单测）。Linux 平台以此为准；本地改动若涉及 env/repl/commands 等平台相关代码，请确认 CI 两个平台都绿再合并。
 
 ## 12. 维护指南（人工维护必读）
 

@@ -2,6 +2,14 @@
 
 pi（TypeScript 终端 Agent）的 C++ 移植版。最核心的 agent 功能：流式对话、工具调用、模型切换、多 agent（子 agent 嵌套）、会话持久化/恢复、上下文压缩、skills、slash 命令。
 
+## 平台支持
+
+| 平台 | 状态 |
+|---|---|
+| macOS（arm64/x86_64） | ✅ 开发与验证平台（单测 + tsan + REPL 实测） |
+| Linux | ✅ CI 验证（GitHub Actions：Ubuntu 24.04 构建 + 单测 + tsan） |
+| Windows | ❌ 原生不支持（REPL/Shell 依赖 POSIX）。请使用 **WSL** 运行 |
+
 ## 构建
 
 依赖：CMake ≥ 3.16、Ninja、clang、libcurl。第三方库（nlohmann-json、openai-cpp、valijson、stb、googletest）由 FetchContent 自动下载。
