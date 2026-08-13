@@ -12,7 +12,8 @@ namespace pi
 namespace
 {
 
-ToolResult error_result(const std::string& message)
+/** 构造纯文本 ToolResult（与错误状态无关，成功/失败路径共用）。 */
+ToolResult text_result(const std::string& message)
 {
     ToolResult result;
     result.content.push_back(ContentBlock{});
@@ -30,8 +31,8 @@ ToolResult run_subagent(const SubagentToolOptions& options, const std::string& p
 {
     if (depth > options.maxNestingDepth)
     {
-        return error_result("Error: max nesting depth exceeded (" +
-                            std::to_string(options.maxNestingDepth) + ")");
+        return text_result("Error: max nesting depth exceeded (" +
+                           std::to_string(options.maxNestingDepth) + ")");
     }
 
     AgentOptions agent_options;
@@ -76,7 +77,7 @@ ToolResult run_subagent(const SubagentToolOptions& options, const std::string& p
     // abort 链：共享父工具的 signal（prompt 前已 abort 则直接失败）
     if (signal && signal->load())
     {
-        return error_result("Error: subagent aborted");
+        return text_result("Error: subagent aborted");
     }
     auto run_finished = std::make_shared<std::atomic<bool>>(false);
     std::thread abort_watcher(
@@ -102,14 +103,30 @@ ToolResult run_subagent(const SubagentToolOptions& options, const std::string& p
     {
         run_finished->store(true);
         if (abort_watcher.joinable()) abort_watcher.join();
-        return error_result("Error: subagent failed: " + std::string(e.what()));
+        return text_result("Error: subagent failed: " + std::string(e.what()));
     }
     run_finished->store(true);
     if (abort_watcher.joinable()) abort_watcher.join();
 
     if (*turns_used >= options.maxTurns)
     {
-        return error_result("Error: max turns exceeded (" + std::to_string(options.maxTurns) + ")");
+        // 轮次上限命中时，只有当最后一轮仍在请求工具（工作被截断）才报错；
+        // 若最后一条 assistant 消息是干净的最终回答，则照常返回。
+        const auto& messages = sub_agent.messages();
+        bool cut_off = false;
+        for (auto it = messages.rbegin(); it != messages.rend(); ++it)
+        {
+            if (it->role == Role::Assistant)
+            {
+                cut_off = it->has_tool_calls();
+                break;
+            }
+        }
+        if (cut_off)
+        {
+            return text_result("Error: max turns exceeded (" + std::to_string(options.maxTurns) +
+                               ")");
+        }
     }
 
     // 汇总子 agent 最后一条成功的 assistant 文本
@@ -135,7 +152,7 @@ ToolResult run_subagent(const SubagentToolOptions& options, const std::string& p
             }
         }
     }
-    return error_result("<subagent>\n" + text + "\n</subagent>");
+    return text_result("<subagent>\n" + text + "\n</subagent>");
 }
 
 AgentTool build_subagent_tool(const SubagentToolOptions& options, int depth)

@@ -6,7 +6,6 @@
 #include <memory>
 #include <string>
 
-#include "pi/agent/agent_loop.h"
 #include "test_utils/scripted_transport.h"
 
 namespace pi
@@ -91,6 +90,44 @@ TEST(SubagentToolTest, MaxTurnsProtection)
     ASSERT_FALSE(result.content.empty());
     // 轮次超限 → 返回错误
     EXPECT_NE(result.content[0].text.find("max turns exceeded"), std::string::npos);
+}
+
+TEST(SubagentToolTest, MaxTurnsWithCleanFinalAnswerReturnsResult)
+{
+    // 恰好跑满 maxTurns 但最后一轮给出干净的最终回答 → 不应误报 "max turns exceeded"
+    auto transport = std::make_shared<pi_test::ScriptedTransport>();
+    transport->add_turn(pi_test::tool_turn(
+        {pi_test::tool_call_block("c1", "loop", Json{{"x", 1}})}));
+    transport->add_turn(pi_test::text_turn("final answer"));
+
+    AgentTool looping_tool;
+    looping_tool.name = "loop";
+    looping_tool.description = "loops";
+    looping_tool.label = "loop";
+    looping_tool.execute = [](const std::string&, const Json&,
+                              const std::shared_ptr<std::atomic<bool>>&,
+                              const std::function<void(const ToolResult&)>&) -> ToolResult
+    {
+        ToolResult result;
+        result.content.push_back(pi_test::text_block("loop again"));
+        return result;
+    };
+
+    SubagentToolOptions options;
+    options.model = pi_test::scripted_model();
+    options.transport = transport;
+    options.tools = {looping_tool};
+    options.systemPrompt = "subagent";
+    options.maxTurns = 2;
+    const AgentTool tool = make_subagent_tool(options);
+
+    const auto result = tool.execute("call_1", Json{{"prompt", "loop then answer"}},
+                                     std::make_shared<std::atomic<bool>>(false), nullptr);
+    ASSERT_FALSE(result.content.empty());
+    const std::string text = result.content[0].text;
+    EXPECT_NE(text.find("<subagent>"), std::string::npos);
+    EXPECT_NE(text.find("final answer"), std::string::npos);
+    EXPECT_EQ(text.find("max turns exceeded"), std::string::npos);
 }
 
 TEST(SubagentToolTest, MaxNestingDepthProtection)

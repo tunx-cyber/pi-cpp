@@ -185,8 +185,9 @@ void load_skills_from_dir(FileSystem& fs, const std::string& dir, bool includeRo
               [](const FileInfo& a, const FileInfo& b) { return a.name < b.name; });
     for (const auto& entry : sorted)
     {
-        if (!entry.name.empty() && entry.name.front() == '.') continue;
+        if (!entry.name.empty() && entry.name.front() == '.') continue;  // 含 .git
         if (entry.name == "node_modules") continue;
+        if (entry.name == "build") continue;
         if (entry.kind == FileKind::Directory)
         {
             load_skills_from_dir(fs, entry.path, false, result);

@@ -16,6 +16,12 @@
 #include <fstream>
 #include <sstream>
 
+// macOS 上 environ 经 _NSGetEnviron() 访问；Linux 由 <unistd.h> 提供
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#define environ (*_NSGetEnviron())
+#endif
+
 namespace pi
 {
 
@@ -376,6 +382,32 @@ Result<ExecResult, ExecutionError> PosixShell::exec(const std::string& command,
     exec_error.code = ExecutionErrorCode::SpawnError;
     exec_error.message = "fork failed";
 
+    // options.env 覆盖：全部在 fork 之前构造好 envp（fork 后到 exec 之间
+    // 只允许 async-signal-safe 调用，不能在子进程里 setenv/malloc）。
+    std::vector<std::string> env_storage;
+    std::vector<char*> envp;
+    if (!options.env.empty())
+    {
+        for (char** e = environ; *e; ++e) env_storage.push_back(*e);
+        for (const auto& [key, value] : options.env)
+        {
+            const std::string assignment = key + "=" + value;
+            bool replaced = false;
+            for (auto& existing : env_storage)
+            {
+                if (existing.compare(0, key.size() + 1, key + "=") == 0)
+                {
+                    existing = assignment;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) env_storage.push_back(assignment);
+        }
+        for (auto& entry : env_storage) envp.push_back(entry.data());
+        envp.push_back(nullptr);
+    }
+
     int stdout_pipe[2];
     int stderr_pipe[2];
     if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0)
@@ -404,7 +436,16 @@ Result<ExecResult, ExecutionError> PosixShell::exec(const std::string& command,
         close(stderr_pipe[0]);
         close(stderr_pipe[1]);
         if (!options.cwd.empty()) chdir(options.cwd.c_str());
-        execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+        if (envp.empty())
+        {
+            execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+        }
+        else
+        {
+            // execle 最后一个参数是环境变量指针数组
+            execle("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr),
+                   envp.data());
+        }
         _exit(127);
     }
 

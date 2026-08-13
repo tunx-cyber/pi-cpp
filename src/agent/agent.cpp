@@ -210,7 +210,7 @@ void Agent::prompt_messages(const std::vector<AgentMessage>& messages)
                 context.messages = messages_;
                 context.tools = tools_;
             }
-            auto config = make_loop_config(false);
+            auto config = make_loop_config();
             run_agent_loop(
                 prompts, context, config, [this, &signal](const AgentEvent& event)
                 { process_events(event, signal); }, signal);
@@ -259,14 +259,14 @@ void Agent::continue_run()
                 context.messages = messages_;
                 context.tools = tools_;
             }
-            auto config = make_loop_config(false);
+            auto config = make_loop_config();
             run_agent_loop_continue(
                 context, config, [this, &signal](const AgentEvent& event)
                 { process_events(event, signal); }, signal);
         });
 }
 
-AgentLoopConfig Agent::make_loop_config(bool skip_initial_steering_poll)
+AgentLoopConfig Agent::make_loop_config()
 {
     AgentLoopConfig config;
     {
@@ -285,16 +285,7 @@ AgentLoopConfig Agent::make_loop_config(bool skip_initial_steering_poll)
         config.prepareNextTurn = prepare_next_turn_;
         config.shouldStopAfterTurn = should_stop_after_turn_;
     }
-    config.getSteeringMessages =
-        [this, skip = skip_initial_steering_poll]() mutable -> std::vector<AgentMessage>
-    {
-        if (skip)
-        {
-            skip = false;  // 只跳过第一次轮询
-            return std::vector<AgentMessage>{};
-        }
-        return steering_queue_.drain();
-    };
+    config.getSteeringMessages = [this]() { return steering_queue_.drain(); };
     config.getFollowUpMessages = [this]() { return follow_up_queue_.drain(); };
     return config;
 }
@@ -351,14 +342,21 @@ void Agent::run_with_lifecycle(
 void Agent::handle_run_failure(const std::exception& error, bool aborted,
                                const std::shared_ptr<std::atomic<bool>>& signal)
 {
+    // model_ 可能被 UI 线程的 set_model 并发修改，先取快照
+    ModelInfo model_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        model_snapshot = model_;
+    }
+
     Message failure;
     failure.role = Role::Assistant;
     ContentBlock block;
     block.type = BlockType::Text;
     failure.content.push_back(std::move(block));
-    failure.api = model_.api;
-    failure.provider = model_.provider;
-    failure.model = model_.id;
+    failure.api = model_snapshot.api;
+    failure.provider = model_snapshot.provider;
+    failure.model = model_snapshot.id;
     failure.stopReason = aborted ? StopReason::Aborted : StopReason::Error;
     failure.errorMessage = error.what();
 

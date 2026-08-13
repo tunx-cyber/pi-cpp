@@ -1,8 +1,7 @@
 #include "pi/ai/json_util.h"
 
+#include <cctype>
 #include <cstdio>
-
-#include <algorithm>
 
 namespace pi
 {
@@ -39,6 +38,78 @@ std::string escape_control_character(char c)
             return buf;
         }
     }
+}
+
+/**
+ * 返回能解析为合法 JSON 的最长前缀（parse_streaming_json 的截断回退）。
+ *
+ * 原实现逐字符弹出并整体重解析，对"大段未闭合字符串"（write 工具的流式参数
+ * 常见形态）是 O(n²)。这里先做一次前向扫描，收集所有「可能成为完整 JSON 值
+ * 末尾」的位置（跟踪字符串状态与括号深度），再从最右候选向左尝试解析。
+ * 常见形态（对象/数组结尾、大段字符串）下候选数远小于 n；病态输入（顶层
+ * 大量交替引号）仍可能 O(n²)，但工具参数 JSON 不会出现该形态。
+ */
+std::string longest_valid_json_prefix(const std::string& text)
+{
+    std::vector<size_t> candidates;
+    bool in_string = false;
+    bool escaped = false;
+    int depth = 0;  // { / [ 增，} / ] 减
+
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        const char c = text[i];
+        if (in_string)
+        {
+            if (escaped)
+            {
+                escaped = false;
+            }
+            else if (c == '\\')
+            {
+                escaped = true;
+            }
+            else if (c == '"')
+            {
+                in_string = false;
+                if (depth == 0) candidates.push_back(i);  // 顶层字符串值结束
+            }
+            continue;
+        }
+        if (c == '"')
+        {
+            in_string = true;
+        }
+        else if (c == '{' || c == '[')
+        {
+            ++depth;
+        }
+        else if (c == '}' || c == ']')
+        {
+            if (depth > 0) --depth;
+            if (depth == 0) candidates.push_back(i);  // 顶层结构结束
+        }
+        else if (depth == 0 &&
+                 (std::isdigit(static_cast<unsigned char>(c)) ||
+                  std::isalpha(static_cast<unsigned char>(c))))
+        {
+            candidates.push_back(i);  // 数字 / true / false / null 的可能末尾
+        }
+    }
+
+    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it)
+    {
+        const std::string candidate = text.substr(0, *it + 1);
+        try
+        {
+            (void)Json::parse(candidate);
+            return candidate;
+        }
+        catch (...)
+        {
+        }
+    }
+    return "";
 }
 
 }  // namespace
@@ -139,14 +210,13 @@ Json parse_streaming_json(const std::string& partial)
     }
     catch (...)
     {
-        // partial-json 回退：从尾部截断，取最长的合法 JSON 前缀
-        std::string candidate = partial;
-        while (!candidate.empty())
+        // partial-json 回退：取最长的合法 JSON 前缀（见 longest_valid_json_prefix）
+        const std::string prefix = longest_valid_json_prefix(partial);
+        if (!prefix.empty())
         {
-            candidate.pop_back();
             try
             {
-                return Json::parse(candidate);
+                return Json::parse(prefix);
             }
             catch (...)
             {

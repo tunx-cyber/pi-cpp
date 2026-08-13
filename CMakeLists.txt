@@ -72,16 +72,6 @@ FetchContent_MakeAvailable(valijson)
 FetchContent_MakeAvailable(stb)
 FetchContent_MakeAvailable(googletest)
 
-# ── 清理 .git 目录以节省空间 ──
-# shallow clone 虽然只拉一个 commit，但 pack 文件仍包含仓库所有文件的完整快照。
-# nlohmann/json: .git/pack 达 177M，实际只需 include/ (996K)。
-# valijson:       .git 达  18M，header-only 库实际只需 ~2M。
-foreach(DEP nlohmann_json openai-cpp valijson stb googletest)
-  if(EXISTS "${${DEP}_SOURCE_DIR}/.git")
-    file(REMOVE_RECURSE "${${DEP}_SOURCE_DIR}/.git")
-    message(STATUS "已删除 ${DEP} 的 .git 目录（节省空间）")
-  endif()
-endforeach()
 
 # openai-cpp 1.0.0 的 webhooks.hpp 使用 std::variant，但发布包未始终显式包含
 # <variant>。libc++ 常通过传递包含掩盖该问题，GCC/libstdc++ 会直接报错。
@@ -121,8 +111,8 @@ target_link_libraries(pi_core PUBLIC
 target_include_directories(pi_core PUBLIC ${stb_SOURCE_DIR})
 target_include_directories(pi_core PUBLIC ${valijson_SOURCE_DIR}/include)
 
-# ============ pi_repl：终端可执行 ============
-add_executable(pi_repl
+# ============ picpp：终端可执行 ============
+add_executable(picpp
   apps/repl/main.cpp
   src/app/settings.cpp
   src/app/images.cpp
@@ -131,12 +121,13 @@ add_executable(pi_repl
   src/app/repl.cpp
   src/app/agent_session.cpp
 )
-target_link_libraries(pi_repl PRIVATE pi_core)
+target_link_libraries(picpp PRIVATE pi_core)
 
 # ============ pi_tests：单元测试 ============
 set(PI_TEST_SOURCES
   tests/main.cpp
   tests/ai/cost_test.cpp
+  tests/ai/json_util_test.cpp
   tests/ai/sse_parser_test.cpp
   tests/ai/model_registry_test.cpp
   tests/ai/transport_test.cpp

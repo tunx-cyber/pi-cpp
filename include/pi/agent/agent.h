@@ -97,7 +97,7 @@ class Agent
     void continue_run();
 
    private:
-    AgentLoopConfig make_loop_config(bool skip_initial_steering_poll);
+    AgentLoopConfig make_loop_config();
     void run_with_lifecycle(
         const std::function<void(const std::shared_ptr<std::atomic<bool>>&)>& executor);
     void process_events(const AgentEvent& event, const std::shared_ptr<std::atomic<bool>>& signal);
