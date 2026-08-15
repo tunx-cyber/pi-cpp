@@ -40,9 +40,9 @@ ModelInfo deepseek_v4_pro()
     ModelInfo m = deepseek_v4_flash();
     m.id = "deepseek-v4-pro";
     m.name = "DeepSeek V4 Pro";
-    m.costInput = 3.132;    // 人民币元/M（原美元 0.435 × 7.2 汇率）
-    m.costOutput = 6.264;
-    m.costCacheRead = 0.0261;
+    m.costInput = 3.0;    // 人民币元/M（原美元 0.435 × 7.2 汇率）
+    m.costOutput = 6.0;
+    m.costCacheRead = 0.025;
     m.costCacheWrite = 0;
     return m;
 }
