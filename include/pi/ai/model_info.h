@@ -41,4 +41,26 @@ struct ModelInfo
     }
 };
 
+/**
+ * 可选的单价覆盖（人民币元/M tokens），来自 settings.json。
+ * 未设置的字段保留模型内置默认价；全空则等于不覆盖。
+ */
+struct PricingOverride
+{
+    std::optional<double> input;
+    std::optional<double> output;
+    std::optional<double> cacheRead;
+    std::optional<double> cacheWrite;
+
+    bool has_any() const { return input || output || cacheRead || cacheWrite; }
+
+    void apply(ModelInfo& m) const
+    {
+        if (input) m.costInput = *input;
+        if (output) m.costOutput = *output;
+        if (cacheRead) m.costCacheRead = *cacheRead;
+        if (cacheWrite) m.costCacheWrite = *cacheWrite;
+    }
+};
+
 }  // namespace pi

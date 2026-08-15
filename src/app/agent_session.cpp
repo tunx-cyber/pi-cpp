@@ -30,6 +30,9 @@ ModelInfo make_custom_model(const std::string& model_id, const std::string& base
 AgentHarnessOptions build_harness_options(const Settings& settings, const std::string& cwd)
 {
     AgentHarnessOptions options;
+    // 注册 settings.json 里自定义模型（同名覆盖内置；幂等）。
+    for (const auto& model : settings.models) register_model(model);
+
     std::string model_id = settings.model;
     if (const auto override = settings.override_for(cwd))
     {
@@ -44,12 +47,14 @@ AgentHarnessOptions build_harness_options(const Settings& settings, const std::s
         options.model = make_custom_model(model_id, settings.baseUrl);
     }
     options.thinkingLevel = settings.thinking;
+    options.pricing = settings.pricing;
     options.transport = make_openai_completions_transport(settings.baseUrl, settings.apiKey);
     options.getApiKey = [&settings](const ModelInfo&) -> std::optional<std::string>
     {
         return settings.apiKey.empty() ? std::nullopt : std::optional<std::string>(settings.apiKey);
     };
-    options.systemPromptBase = "You are pi-cpp, a helpful coding assistant in a terminal.";
+    options.systemPromptBase = settings.systemPrompt;
+    options.compactionSettings = settings.compaction;
     return options;
 }
 

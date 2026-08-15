@@ -262,12 +262,7 @@ CurlFetchResult fetch_url(const std::string& url, int timeout_seconds, size_t ma
 // ---------- web search ----------
 
 // DeepSeek Anthropic-compatible Messages API 常量（镜像 dsh-web-search-deepseek）
-constexpr const char* kWebSearchDefaultBaseUrl = "https://api.deepseek.com/anthropic/v1";
-constexpr const char* kWebSearchDefaultModel = "deepseek-v4-flash";
 constexpr const char* kWebSearchApiVersion = "2023-06-01";
-constexpr int kWebSearchMaxTokens = 4096;
-constexpr int kWebSearchMaxUses = 5;
-constexpr int kWebSearchMaxResults = 8;
 
 /** 从 URL 提取 host（"://" 之后到第一个 / ? # 之间），作为无标题来源的兜底标签。 */
 std::string hostname_of(const std::string& url)
@@ -284,7 +279,8 @@ std::string hostname_of(const std::string& url)
  * 不得抛异常——失败以 WebSearchResult::error 返回；abort 经 progress callback 中止。
  */
 WebSearchResult deepseek_web_search(const std::string& query, const std::string& apiKey,
-                                    const std::shared_ptr<std::atomic<bool>>& signal)
+                                    const std::shared_ptr<std::atomic<bool>>& signal,
+                                    const WebSearchConfig& config)
 {
     WebSearchResult result;
     if (apiKey.empty())
@@ -294,7 +290,7 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
         return result;
     }
 
-    std::string base_url = kWebSearchDefaultBaseUrl;
+    std::string base_url = config.baseUrl;
     if (const char* env = std::getenv("DEEPSEEK_SEARCH_BASE_URL"); env && *env)
     {
         base_url = env;
@@ -303,15 +299,15 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
 
     // 请求体：镜像 DeepSeekSearchLlmRequest
     Json body;
-    body["model"] = kWebSearchDefaultModel;
-    body["max_tokens"] = kWebSearchMaxTokens;
+    body["model"] = config.model;
+    body["max_tokens"] = config.maxTokens;
     body["messages"] = Json::array({Json{
         {"role", "user"},
         {"content", Json::array({Json{{"type", "text"},
                                        {"text", "Perform a web search for the query: " + query}}})}}});
     body["tools"] = Json::array({Json{{"type", "web_search_20250305"},
                                       {"name", "web_search"},
-                                      {"max_uses", kWebSearchMaxUses}}});
+                                      {"max_uses", config.maxUses}}});
     const std::string body_json = body.dump();
 
     CURL* curl = curl_easy_init();
@@ -400,7 +396,7 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
         return result;
     }
 
-    return map_deepseek_search_response(response, kWebSearchMaxResults);
+    return map_deepseek_search_response(response, config.maxResults);
 }
 
 }  // namespace
@@ -525,7 +521,8 @@ std::string format_search_output(const WebSearchResult& result)
     return out;
 }
 
-std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::string& apiKey)
+std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::string& apiKey,
+                                         const WebSearchConfig& searchConfig)
 {
     const std::string workspace = detect_workspace_root(cwd);
     std::vector<AgentTool> tools;
@@ -976,7 +973,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
              {"properties",
               Json{{"query", Json{{"type", "string"}, {"description", "The search query."}}}}},
              {"required", Json::array({"query"})}},
-        [apiKey](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+        [apiKey, searchConfig](const Json& args,
+                               const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
             ToolResult result;
             const std::string query = args.value("query", "");
@@ -988,7 +986,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
                     "[web_search error] query must be a non-empty string";
                 return result;
             }
-            const auto search = deepseek_web_search(query, apiKey, signal);
+            const auto search = deepseek_web_search(query, apiKey, signal, searchConfig);
             result.content.push_back(ContentBlock{});
             result.content.back().type = BlockType::Text;
             if (!search.error.empty())

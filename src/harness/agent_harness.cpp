@@ -15,8 +15,10 @@ AgentHarness::AgentHarness(AgentHarnessOptions options)
       get_api_key_(std::move(options.getApiKey)),
       model_(std::move(options.model)),
       thinking_level_(options.thinkingLevel),
+      pricing_(options.pricing),
       compaction_settings_(options.compactionSettings)
 {
+    pricing_.apply(model_);
     default_model_ = model_;
     default_thinking_level_ = thinking_level_;
     agent_.set_system_prompt(build_system_prompt());
@@ -72,6 +74,7 @@ void AgentHarness::reload()
         if (model)
         {
             model_ = *model;
+            pricing_.apply(model_);
             agent_.set_model(model_);
         }
     }
@@ -134,8 +137,9 @@ void AgentHarness::reset()
 void AgentHarness::set_model(const ModelInfo& model)
 {
     model_ = model;
-    agent_.set_model(model);
-    session_.append_model_change(model.provider, model.id);
+    pricing_.apply(model_);
+    agent_.set_model(model_);
+    session_.append_model_change(model_.provider, model_.id);
 }
 
 void AgentHarness::set_thinking_level(ThinkingLevel level)

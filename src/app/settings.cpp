@@ -139,6 +139,44 @@ bool write_settings_json(const std::string& path, const Json& json)
     return chmod(path.c_str(), 0600) == 0;
 }
 
+/** 序列化自定义模型（settings.json 的 models 数组元素）。 */
+Json model_to_json(const ModelInfo& m)
+{
+    Json j = Json::object();
+    j["id"] = m.id;
+    j["name"] = m.name;
+    j["baseUrl"] = m.baseUrl;
+    j["provider"] = m.provider;
+    j["reasoning"] = m.reasoning;
+    j["contextWindow"] = m.contextWindow;
+    j["maxTokens"] = m.maxTokens;
+    j["costInput"] = m.costInput;
+    j["costOutput"] = m.costOutput;
+    j["costCacheRead"] = m.costCacheRead;
+    j["costCacheWrite"] = m.costCacheWrite;
+    return j;
+}
+
+/** 解析自定义模型；缺省 baseUrl 回退到全局 baseUrl（镜像 make_custom_model 的默认值）。 */
+ModelInfo model_from_json(const Json& j, const std::string& defaultBaseUrl)
+{
+    ModelInfo m;
+    m.id = j.value("id", "");
+    m.name = j.value("name", m.id);
+    m.api = "openai-completions";
+    m.provider = j.value("provider", "custom");
+    m.baseUrl = j.value("baseUrl", defaultBaseUrl);
+    m.reasoning = j.value("reasoning", false);
+    m.input = {"text", "image"};
+    m.contextWindow = j.value("contextWindow", 131072LL);
+    m.maxTokens = j.value("maxTokens", 32768LL);
+    m.costInput = j.value("costInput", 0.0);
+    m.costOutput = j.value("costOutput", 0.0);
+    m.costCacheRead = j.value("costCacheRead", 0.0);
+    m.costCacheWrite = j.value("costCacheWrite", 0.0);
+    return m;
+}
+
 Json settings_json(const Settings& settings, const Json& by_cwd)
 {
     Json json = Json::object();
@@ -146,6 +184,26 @@ Json settings_json(const Settings& settings, const Json& by_cwd)
     json["baseUrl"] = settings.baseUrl;
     json["model"] = settings.model;
     json["thinking"] = to_string(settings.thinking);
+    json["sessionsRoot"] = settings.sessionsRoot;
+    json["systemPrompt"] = settings.systemPrompt;
+    if (settings.pricing.input) json["costInput"] = *settings.pricing.input;
+    if (settings.pricing.output) json["costOutput"] = *settings.pricing.output;
+    if (settings.pricing.cacheRead) json["costCacheRead"] = *settings.pricing.cacheRead;
+    if (settings.pricing.cacheWrite) json["costCacheWrite"] = *settings.pricing.cacheWrite;
+    json["compaction"] = Json{{"enabled", settings.compaction.enabled},
+                              {"reserveTokens", settings.compaction.reserveTokens},
+                              {"keepRecentTokens", settings.compaction.keepRecentTokens}};
+    json["webSearch"] = Json{{"baseUrl", settings.webSearch.baseUrl},
+                             {"model", settings.webSearch.model},
+                             {"maxTokens", settings.webSearch.maxTokens},
+                             {"maxUses", settings.webSearch.maxUses},
+                             {"maxResults", settings.webSearch.maxResults}};
+    if (!settings.models.empty())
+    {
+        Json arr = Json::array();
+        for (const auto& m : settings.models) arr.push_back(model_to_json(m));
+        json["models"] = std::move(arr);
+    }
     json["byCwd"] = by_cwd;
     return json;
 }
@@ -189,6 +247,59 @@ Settings Settings::load()
         {
             if (const auto level = thinking_from_json((*json)["thinking"]))
                 settings.thinking = *level;
+        }
+        const auto read_price = [&](const char* key) -> std::optional<double>
+        {
+            if (json->contains(key) && (*json)[key].is_number())
+                return (*json)[key].get<double>();
+            return std::nullopt;
+        };
+        settings.pricing.input = read_price("costInput");
+        settings.pricing.output = read_price("costOutput");
+        settings.pricing.cacheRead = read_price("costCacheRead");
+        settings.pricing.cacheWrite = read_price("costCacheWrite");
+        if (json->contains("sessionsRoot") && (*json)["sessionsRoot"].is_string())
+            settings.sessionsRoot = (*json)["sessionsRoot"].get<std::string>();
+        if (json->contains("systemPrompt") && (*json)["systemPrompt"].is_string())
+            settings.systemPrompt = (*json)["systemPrompt"].get<std::string>();
+        if (json->contains("models") && (*json)["models"].is_array())
+        {
+            for (const auto& item : (*json)["models"])
+            {
+                try
+                {
+                    ModelInfo m = model_from_json(item, settings.baseUrl);
+                    if (!m.id.empty()) settings.models.push_back(std::move(m));
+                }
+                catch (...)
+                {
+                    // 跳过非法模型条目，避免一个坏条目拖垮整个配置
+                }
+            }
+        }
+        if (json->contains("compaction") && (*json)["compaction"].is_object())
+        {
+            const auto& c = (*json)["compaction"];
+            if (c.contains("enabled") && c["enabled"].is_boolean())
+                settings.compaction.enabled = c["enabled"].get<bool>();
+            if (c.contains("reserveTokens") && c["reserveTokens"].is_number())
+                settings.compaction.reserveTokens = c["reserveTokens"].get<int64_t>();
+            if (c.contains("keepRecentTokens") && c["keepRecentTokens"].is_number())
+                settings.compaction.keepRecentTokens = c["keepRecentTokens"].get<int64_t>();
+        }
+        if (json->contains("webSearch") && (*json)["webSearch"].is_object())
+        {
+            const auto& w = (*json)["webSearch"];
+            if (w.contains("baseUrl") && w["baseUrl"].is_string())
+                settings.webSearch.baseUrl = w["baseUrl"].get<std::string>();
+            if (w.contains("model") && w["model"].is_string())
+                settings.webSearch.model = w["model"].get<std::string>();
+            if (w.contains("maxTokens") && w["maxTokens"].is_number())
+                settings.webSearch.maxTokens = w["maxTokens"].get<int>();
+            if (w.contains("maxUses") && w["maxUses"].is_number())
+                settings.webSearch.maxUses = w["maxUses"].get<int>();
+            if (w.contains("maxResults") && w["maxResults"].is_number())
+                settings.webSearch.maxResults = w["maxResults"].get<int>();
         }
     }
     // .env 文件（优先级：~/.pi-cpp/.env < 当前目录向上最近的项目 .env < 环境变量）。

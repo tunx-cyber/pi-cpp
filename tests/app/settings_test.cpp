@@ -53,5 +53,66 @@ TEST_F(SettingsTest, PersistsCwdOverrides)
               std::filesystem::perms::none);
 }
 
+TEST_F(SettingsTest, PersistsPricingOverride)
+{
+    Settings settings;
+    settings.pricing.input = 1.5;
+    settings.pricing.output = 3.0;
+    settings.pricing.cacheRead = 0.1;
+    settings.pricing.cacheWrite = 0.2;
+    settings.save();
+
+    const auto loaded = Settings::load();
+    ASSERT_TRUE(loaded.pricing.input.has_value());
+    ASSERT_TRUE(loaded.pricing.output.has_value());
+    ASSERT_TRUE(loaded.pricing.cacheRead.has_value());
+    ASSERT_TRUE(loaded.pricing.cacheWrite.has_value());
+    EXPECT_DOUBLE_EQ(*loaded.pricing.input, 1.5);
+    EXPECT_DOUBLE_EQ(*loaded.pricing.output, 3.0);
+    EXPECT_DOUBLE_EQ(*loaded.pricing.cacheRead, 0.1);
+    EXPECT_DOUBLE_EQ(*loaded.pricing.cacheWrite, 0.2);
+}
+
+TEST_F(SettingsTest, PersistsCustomModelsAndExtendedConfig)
+{
+    Settings settings;
+    settings.sessionsRoot = "~/.custom-sessions";
+    settings.systemPrompt = "custom system prompt";
+    ModelInfo custom;
+    custom.id = "qwen2.5-coder";
+    custom.name = "Qwen 2.5 Coder";
+    custom.baseUrl = "http://localhost:11434/v1";
+    custom.provider = "custom";
+    custom.contextWindow = 32768;
+    custom.maxTokens = 8192;
+    custom.costInput = 0.5;
+    custom.costOutput = 1.0;
+    settings.models.push_back(custom);
+    settings.compaction.enabled = false;
+    settings.compaction.reserveTokens = 8000;
+    settings.compaction.keepRecentTokens = 10000;
+    settings.webSearch.model = "deepseek-v4-pro";
+    settings.webSearch.maxTokens = 2048;
+    settings.save();
+
+    const auto loaded = Settings::load();
+    EXPECT_EQ(loaded.sessionsRoot, "~/.custom-sessions");
+    EXPECT_EQ(loaded.systemPrompt, "custom system prompt");
+    ASSERT_EQ(loaded.models.size(), 1u);
+    EXPECT_EQ(loaded.models[0].id, "qwen2.5-coder");
+    EXPECT_EQ(loaded.models[0].name, "Qwen 2.5 Coder");
+    EXPECT_EQ(loaded.models[0].baseUrl, "http://localhost:11434/v1");
+    EXPECT_EQ(loaded.models[0].provider, "custom");
+    EXPECT_EQ(loaded.models[0].contextWindow, 32768);
+    EXPECT_EQ(loaded.models[0].maxTokens, 8192);
+    EXPECT_DOUBLE_EQ(loaded.models[0].costInput, 0.5);
+    EXPECT_DOUBLE_EQ(loaded.models[0].costOutput, 1.0);
+    EXPECT_FALSE(loaded.compaction.enabled);
+    EXPECT_EQ(loaded.compaction.reserveTokens, 8000);
+    EXPECT_EQ(loaded.compaction.keepRecentTokens, 10000);
+    EXPECT_EQ(loaded.webSearch.model, "deepseek-v4-pro");
+    EXPECT_EQ(loaded.webSearch.maxTokens, 2048);
+}
+
 }  // namespace
 }  // namespace pi

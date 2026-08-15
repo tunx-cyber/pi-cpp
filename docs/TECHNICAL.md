@@ -242,11 +242,30 @@ JSONL 格式（pi 兼容 version-3）：
 {
   "apiKey": "...", "baseUrl": "https://api.deepseek.com",
   "model": "deepseek-v4-flash", "thinking": "off",
+  "sessionsRoot": "~/.pi-cpp/agent/sessions",
+  "systemPrompt": "You are pi-cpp, a helpful coding assistant in a terminal.",
+  "costInput": 1.008, "costOutput": 2.016,
+  "costCacheRead": 0.02016, "costCacheWrite": 0,
+  "models": [
+    { "id": "qwen2.5-coder", "name": "Qwen 2.5 Coder",
+      "baseUrl": "http://localhost:11434/v1",
+      "contextWindow": 32768, "maxTokens": 8192, "reasoning": false,
+      "costInput": 0.5, "costOutput": 1.0 }
+  ],
+  "compaction": { "enabled": true, "reserveTokens": 16384, "keepRecentTokens": 20000 },
+  "webSearch": { "baseUrl": "https://api.deepseek.com/anthropic/v1",
+    "model": "deepseek-v4-flash", "maxTokens": 4096, "maxUses": 5, "maxResults": 8 },
   "byCwd": { "/path/to/project": {"model": "deepseek-v4-pro", "thinking": "high"} }
 }
 ```
 
 apiKey 优先级：环境变量 `PI_API_KEY` > `DEEPSEEK_API_KEY` > 项目根 `.env` > `~/.pi-cpp/.env` > settings.json。`.env` 解析支持注释/引号/空白。`PI_BASE_URL`/`PI_MODEL` 环境变量覆盖端点与模型（测试与切换端点用）。模型选择按 cwd 持久化（`set_override` 写 `byCwd`），重启后 `resume` 恢复。
+
+单价（人民币元/M tokens）可在 settings.json 可选配置：costInput / costOutput / costCacheRead / costCacheWrite 四键；未设置的键保留内置模型默认价（自定义模型默认 ¥0）。这些值在模型解析后由 harness 统一应用（构造、set_model、reload 均覆盖），计费与实际接入的模型无关，改完重启生效。
+
+models 数组：定义自定义模型（id 必填；name/baseUrl/contextWindow/maxTokens/reasoning/costInput 等可选；缺省 baseUrl 回退到全局 baseUrl，reasoning 默认 false，未配单价的模型计费 ¥0）。同名 id 覆盖内置模型；这些模型会出现在 /model 列表并可切换，Ctrl+P 循环切换全部模型。自定义模型使用自身 baseUrl（内置模型仍跟随全局 baseUrl/PI_BASE_URL）。
+
+compaction 对象：enabled/reserveTokens/keepRecentTokens 控制自动压缩。systemPrompt 覆盖系统提示词 base。webSearch 对象：baseUrl/model/maxTokens/maxUses/maxResults 控制 web_search 工具（baseUrl 仍可被环境变量 DEEPSEEK_SEARCH_BASE_URL 覆盖）。sessionsRoot 指定会话存储目录。
 
 ### 5.2 图片（images.cpp）
 

@@ -26,8 +26,19 @@ struct WebSearchResult
     std::string error;  // 失败信息；成功时为空
 };
 
+/** web_search 的可配置参数（来自 settings.json 的 webSearch 对象）。 */
+struct WebSearchConfig
+{
+    std::string baseUrl = "https://api.deepseek.com/anthropic/v1";
+    std::string model = "deepseek-v4-flash";
+    int maxTokens = 4096;
+    int maxUses = 5;
+    int maxResults = 8;
+};
+
 /** 编码工具（read/bash/edit/write/grep/find/ls/web_fetch/web_search），供 agent 使用。 */
-std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::string& apiKey = "");
+std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::string& apiKey = "",
+                                         const WebSearchConfig& searchConfig = {});
 
 /** 将 DeepSeek Anthropic Messages 响应映射为标准化搜索结果（镜像 mapAnthropicResponse）。 */
 WebSearchResult map_deepseek_search_response(const Json& response, int maxResults);

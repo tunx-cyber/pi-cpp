@@ -573,7 +573,7 @@ class OpenAiCompletionsTransport::Impl
         }
         try
         {
-            client_ = make_client(request_api_key);
+            client_ = make_client(request_api_key, model);
         }
         catch (const std::exception& e)
         {
@@ -720,11 +720,15 @@ class OpenAiCompletionsTransport::Impl
     }
 
    private:
-    std::unique_ptr<openai::OpenAIClient> make_client(const std::string& apiKey)
+    std::unique_ptr<openai::OpenAIClient> make_client(const std::string& apiKey,
+                                                      const ModelInfo& model)
     {
         openai::ClientOptions options;
         options.api_key = apiKey;
-        options.base_url = baseUrl_;
+        // 自定义模型用自身 baseUrl（settings.json 的 models[]）；内置模型跟随全局
+        // baseUrl（settings.baseUrl / PI_BASE_URL），保持既有覆盖语义。
+        const bool custom_endpoint = model.provider == "custom" && !model.baseUrl.empty();
+        options.base_url = custom_endpoint ? model.baseUrl : baseUrl_;
         options.timeout = timeout_;
         options.max_retries = 0;
         options.use_bearer_auth = true;

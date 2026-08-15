@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "pi/ai/model_info.h"
 #include "pi/agent/agent.h"
 #include "pi/harness/compaction.h"
 #include "pi/harness/session.h"
@@ -24,6 +25,8 @@ struct AgentHarnessOptions
     std::shared_ptr<TransportAdapter> transport;
     std::function<std::optional<std::string>(const ModelInfo&)> getApiKey;
     ModelInfo model;
+    /** 单价覆盖（人民币元/M tokens），应用到所有解析出的模型。 */
+    PricingOverride pricing;
     ThinkingLevel thinkingLevel = ThinkingLevel::Off;
     QueueMode steeringMode = QueueMode::OneAtATime;
     QueueMode followUpMode = QueueMode::OneAtATime;
@@ -92,6 +95,7 @@ class AgentHarness
     ModelInfo model_;
     ThinkingLevel thinking_level_;
     ModelInfo default_model_;             // 构造时确定，reload() 先恢复默认再按会话覆盖
+    PricingOverride pricing_;             // 单价覆盖，构造时确定
     ThinkingLevel default_thinking_level_;
     CompactionSettings compaction_settings_;
     mutable std::mutex cost_mutex_;  // 保护 total_cost_（跨线程读写）

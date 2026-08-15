@@ -64,5 +64,19 @@ TEST(CostTest, DeepseekFlashPricesInCny)
     EXPECT_DOUBLE_EQ(cost.total, 0.00505008);
 }
 
+TEST(CostTest, PricingOverrideApplies)
+{
+    ModelInfo model = *get_model("deepseek-v4-flash");
+    PricingOverride override;
+    override.input = 9.9;
+    override.output = 8.8;
+    override.apply(model);
+    EXPECT_DOUBLE_EQ(model.costInput, 9.9);
+    EXPECT_DOUBLE_EQ(model.costOutput, 8.8);
+    // 未覆盖的字段保留内置默认价
+    EXPECT_DOUBLE_EQ(model.costCacheRead, 0.02016);
+    EXPECT_DOUBLE_EQ(model.costCacheWrite, 0.0);
+}
+
 }  // namespace
 }  // namespace pi

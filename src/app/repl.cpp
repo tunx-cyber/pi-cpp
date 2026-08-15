@@ -994,7 +994,18 @@ void Repl::handle_command(const std::string& line)
         else
         {
             std::cout << "当前模型：" << session_.model().id << std::endl;
-            std::cout << "可用模型：deepseek-v4-flash, deepseek-v4-pro" << std::endl;
+            std::vector<std::string> ids;
+            for (const auto& provider : get_providers())
+            {
+                for (const auto& m : get_models(provider)) ids.push_back(m.id);
+            }
+            std::cout << "可用模型：";
+            for (size_t i = 0; i < ids.size(); ++i)
+            {
+                if (i) std::cout << ", ";
+                std::cout << ids[i];
+            }
+            std::cout << std::endl;
         }
         return;
     }
@@ -1168,7 +1179,8 @@ void Repl::handle_command(const std::string& line)
     }
     if (name == "tools")
     {
-        session_.set_tools(make_coding_tools(cwd_, session_.api_key()));
+        session_.set_tools(
+            make_coding_tools(cwd_, session_.api_key(), session_.web_search_config()));
         std::cout << "已启用编码工具：read/bash/edit/write/grep/find/ls/web_fetch/web_search"
                   << std::endl;
         return;
@@ -1207,16 +1219,18 @@ std::string Repl::help_text()
 
 void Repl::cycle_model()
 {
+    std::vector<std::string> ids;
+    for (const auto& provider : get_providers())
+    {
+        for (const auto& m : get_models(provider)) ids.push_back(m.id);
+    }
+    if (ids.empty()) return;
     const std::string current = session_.model().id;
     const auto old_thinking = session_.thinking_level();
-    if (current == "deepseek-v4-flash")
-    {
-        session_.set_model("deepseek-v4-pro");
-    }
-    else
-    {
-        session_.set_model("deepseek-v4-flash");
-    }
+    const auto it = std::find(ids.begin(), ids.end(), current);
+    const size_t next =
+        it == ids.end() ? 0 : (static_cast<size_t>(std::distance(ids.begin(), it)) + 1) % ids.size();
+    session_.set_model(ids[next]);
     std::cout << "\r\nmodel → " << session_.model().id << std::endl;
     // set_model 内部已保证 thinking 合法；若发生了回退则明确提示（与 /model 命令一致）
     if (session_.thinking_level() != old_thinking)

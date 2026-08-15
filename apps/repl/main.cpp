@@ -87,7 +87,7 @@ int main(int argc, char** argv)
         {
             session.resume();
         }
-        session.set_tools(pi::make_coding_tools(cwd, settings.apiKey));
+        session.set_tools(pi::make_coding_tools(cwd, settings.apiKey, settings.webSearch));
 
         // 流式输出到 stdout，结束打印 usage/计费
         session.subscribe(
