@@ -26,9 +26,9 @@ ModelInfo deepseek_v4_flash()
         {ThinkingLevel::Xhigh, "max"},
     };
     m.input = {"text"};
-    m.costInput = 0.14;
-    m.costOutput = 0.28;
-    m.costCacheRead = 0.0028;
+    m.costInput = 1.008;    // 人民币元/M（原美元 0.14 × 7.2 汇率）
+    m.costOutput = 2.016;
+    m.costCacheRead = 0.02016;
     m.costCacheWrite = 0;
     m.contextWindow = 1000000;
     m.maxTokens = 384000;
@@ -40,9 +40,9 @@ ModelInfo deepseek_v4_pro()
     ModelInfo m = deepseek_v4_flash();
     m.id = "deepseek-v4-pro";
     m.name = "DeepSeek V4 Pro";
-    m.costInput = 0.435;
-    m.costOutput = 0.87;
-    m.costCacheRead = 0.003625;
+    m.costInput = 3.132;    // 人民币元/M（原美元 0.435 × 7.2 汇率）
+    m.costOutput = 6.264;
+    m.costCacheRead = 0.0261;
     m.costCacheWrite = 0;
     return m;
 }

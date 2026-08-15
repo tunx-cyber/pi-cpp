@@ -109,7 +109,7 @@ int main(int argc, char** argv)
                     const auto& usage = event.message.usage;
                     std::cout << std::endl
                               << "[usage] in=" << usage.input << " out=" << usage.output
-                              << " cacheRead=" << usage.cacheRead << " cost=$" << usage.cost.total
+                              << " cacheRead=" << usage.cacheRead << " cost=¥" << usage.cost.total
                               << " stop=" << pi::to_string(event.message.stopReason);
                     if (!event.message.errorMessage.empty())
                     {

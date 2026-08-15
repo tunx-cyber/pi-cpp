@@ -5,7 +5,7 @@
 namespace pi
 {
 
-/** Pure cost calculation mirroring pi's calculateCost: price/1e6 * tokens. */
+/** 纯计费计算（镜像 pi 的 calculateCost）：单价(¥/M) / 1e6 × token，结果为人民币。 */
 inline Cost calculate_cost(const ModelInfo& model, const Usage& usage)
 {
     Cost cost;

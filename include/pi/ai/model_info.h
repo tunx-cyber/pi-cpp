@@ -22,7 +22,7 @@ struct ModelInfo
     /** Maps pi thinking levels to provider values; nullopt key marks unsupported. */
     std::map<ThinkingLevel, std::optional<std::string>> thinkingLevelMap;
     std::vector<std::string> input;  // "text" / "image"
-    double costInput = 0;            // $/M tokens
+    double costInput = 0;  // 人民币单价 ¥/M tokens
     double costOutput = 0;
     double costCacheRead = 0;
     double costCacheWrite = 0;

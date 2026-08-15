@@ -28,9 +28,9 @@ TEST(CostTest, CalculatesZeroForZeroUsage)
 TEST(CostTest, CalculatesPerMillionTokens)
 {
     ModelInfo model;
-    model.costInput = 2.0;      // $2/M
-    model.costOutput = 8.0;     // $8/M
-    model.costCacheRead = 0.5;  // $0.5/M
+    model.costInput = 2.0;      // ¥2/M
+    model.costOutput = 8.0;     // ¥8/M
+    model.costCacheRead = 0.5;  // ¥0.5/M
     model.costCacheWrite = 1.0;
     Usage usage;
     usage.input = 1000000;
@@ -46,7 +46,7 @@ TEST(CostTest, CalculatesPerMillionTokens)
     EXPECT_DOUBLE_EQ(cost.total, 6.225);
 }
 
-TEST(CostTest, DeepseekFlashPrices)
+TEST(CostTest, DeepseekFlashPricesInCny)
 {
     const auto model = get_model("deepseek-v4-flash");
     ASSERT_TRUE(model.has_value());
@@ -57,11 +57,11 @@ TEST(CostTest, DeepseekFlashPrices)
     usage.cacheWrite = 0;
     usage.totalTokens = 3500;
     const Cost cost = calculate_cost(*model, usage);
-    // 0.14/1e6*1000 + 0.28/1e6*2000 + 0.0028/1e6*500
-    EXPECT_DOUBLE_EQ(cost.input, 0.00014);
-    EXPECT_DOUBLE_EQ(cost.output, 0.00056);
-    EXPECT_DOUBLE_EQ(cost.cacheRead, 0.0000014);
-    EXPECT_DOUBLE_EQ(cost.total, 0.0007014);
+    // 1.008/1e6*1000 + 2.016/1e6*2000 + 0.02016/1e6*500
+    EXPECT_DOUBLE_EQ(cost.input, 0.001008);
+    EXPECT_DOUBLE_EQ(cost.output, 0.004032);
+    EXPECT_DOUBLE_EQ(cost.cacheRead, 0.00001008);
+    EXPECT_DOUBLE_EQ(cost.total, 0.00505008);
 }
 
 }  // namespace

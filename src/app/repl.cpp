@@ -82,8 +82,8 @@ std::string status_text(const AgentSession& session, const ProcessMemoryUsage& m
     const ModelInfo model = session.model();
     std::string thinking = to_string(session.thinking_level());
     std::string out = "[model=" + model.id + "] [thinking=" + thinking + "]";
-    out += " [turn=$" + std::to_string(session.total_cost()) + "]";
-    out += " [all=$" + std::to_string(session.all_time_cost()) + "]";
+    out += " [turn=¥" + std::to_string(session.total_cost()) + "]";
+    out += " [all=¥" + std::to_string(session.all_time_cost()) + "]";
     out += " [mem " + format_process_memory(memory);
     if (peak_memory.hasResident)
     {

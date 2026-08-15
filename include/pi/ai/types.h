@@ -138,7 +138,7 @@ struct ContentBlock
     std::string thoughtSignature;
 };
 
-/** Cost in USD, mirroring pi's Usage.cost. */
+/** Cost in CNY (人民币), mirroring pi's Usage.cost. */
 struct Cost
 {
     double input = 0;
