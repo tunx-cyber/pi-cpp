@@ -40,7 +40,9 @@ int main(int argc, char** argv)
         }
         if (prompt.empty() && isatty(STDIN_FILENO))
         {
-            // 交互式 TTY 但给了 --image：忽略
+            // 交互式 TTY 但只给了 --image 而无 prompt：无内容可处理，直接退出
+            std::cerr << "no prompt provided" << std::endl;
+            return 1;
         }
         if (prompt.empty())
         {

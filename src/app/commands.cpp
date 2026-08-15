@@ -367,6 +367,16 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
             const auto resolved = workspace_path(cwd, args.value("path", ""), false, workspace);
             const std::string path = resolved.value_or("");
             ToolResult result;
+            if (path.empty())
+            {
+                // workspace_path 对缺失文件（allow_missing=false）与越界路径都返回 nullopt，
+                // 此处区分于「oldString 未命中」，给出明确报错。
+                result.content.push_back(ContentBlock{});
+                result.content.back().type = BlockType::Text;
+                result.content.back().text = "Error: file not found or path outside workspace: " +
+                                             args.value("path", std::string(""));
+                return result;
+            }
             const std::string content = read_file_text(path);
             const std::string old_string = args.value("oldString", "");
             const std::string new_string = args.value("newString", "");
@@ -462,8 +472,11 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                 args.contains("maxResults") ? args["maxResults"].get<int>() : 50;
             ToolResult result;
             std::vector<std::string> matches;
-            std::function<void(const std::string&)> search = [&](const std::string& dir)
+            constexpr int kMaxSearchDepth = 32;
+            std::function<void(const std::string&, int)> search =
+                [&](const std::string& dir, int depth)
             {
+                if (depth > kMaxSearchDepth) return;  // 防病态深目录栈溢出
                 DIR* d = opendir(dir.c_str());
                 if (!d) return;
                 struct dirent* entry;
@@ -481,7 +494,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
                     if (lstat(full.c_str(), &st) != 0) continue;
                     if (S_ISDIR(st.st_mode))
                     {
-                        search(full);
+                        search(full, depth + 1);
                         continue;
                     }
                     if (!S_ISREG(st.st_mode)) continue;
@@ -512,7 +525,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
             }
             if (S_ISDIR(st.st_mode))
             {
-                search(path);
+                search(path, 0);
             }
             else
             {

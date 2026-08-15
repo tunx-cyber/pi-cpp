@@ -310,7 +310,6 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
         out.messages.push_back(std::move(sys));
     }
 
-    std::string last_role;
     std::vector<openai_json> pending_extras;
 
     for (size_t i = 0; i < messages.size(); ++i)
@@ -525,16 +524,9 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
                     user.content.push_back(std::move(img));
                 }
                 out.messages.push_back(std::move(user));
-                last_role = "user";
-            }
-            else
-            {
-                last_role = "toolResult";
             }
             continue;
         }
-        last_role = msg.role == Role::ToolResult ? "toolResult"
-                                                 : (msg.role == Role::User ? "user" : "assistant");
     }
 
     out.assistantExtras = std::move(pending_extras);
@@ -670,10 +662,10 @@ class OpenAiCompletionsTransport::Impl
         {
             request_options.headers[key] = value;
         }
-        if (opts.onResponse)
-        {
-            // openai-cpp 不暴露原始响应头回调；状态码在异常中携带，此处留空
-        }
+        // 注意：opts.onResponse（响应头回调）当前未实现——openai-cpp 的 HttpClient 接口
+        // 不向上传递原始响应头，状态码/错误信息已通过异常与错误事件携带。
+        // 若未来需要，需在 AbortableHttpClient 中把 status/headers 回传到 Impl。
+        (void)opts.onResponse;
 
         StreamContext ctx{output, sink, model};
 

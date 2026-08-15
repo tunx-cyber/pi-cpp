@@ -100,6 +100,9 @@ void AgentSession::new_session()
     const auto created = repo_.create(cwd_);
     if (!created.ok) return;
     harness_.session() = created.value;
+    // /new 新建会话文件后必须清空 agent 内存中的 transcript，否则下一轮 prompt
+    // 会把旧会话的历史一并发送给 LLM，导致上下文与会话文件（/resume 恢复结果）脱节。
+    harness_.reset();
     harness_.set_model(resolve_model());
     harness_.set_thinking_level(settings_.thinking);
     std::lock_guard<std::mutex> lock(cost_mutex_);

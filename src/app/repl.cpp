@@ -407,11 +407,13 @@ Repl::Repl(AgentSession& session, std::string cwd)
             {
                 // 提取工具特有信息用于展示
                 std::string detail;
-                if (event.toolName == "bash" && event.args.contains("command"))
+                if (event.toolName == "bash" && event.args.contains("command") &&
+                    event.args["command"].is_string())
                 {
                     detail = event.args["command"].get<std::string>();
                 }
-                else if (event.toolName == "edit" && event.args.contains("path"))
+                else if (event.toolName == "edit" && event.args.contains("path") &&
+                         event.args["path"].is_string())
                 {
                     detail = event.args["path"].get<std::string>();
                 }
@@ -423,12 +425,9 @@ Repl::Repl(AgentSession& session, std::string cwd)
                 std::string detail;
                 if (event.toolName == "edit")
                 {
-                    const std::string old_str =
-                        event.args.contains("oldString") ? event.args["oldString"].get<std::string>()
-                                                         : "";
-                    const std::string new_str =
-                        event.args.contains("newString") ? event.args["newString"].get<std::string>()
-                                                         : "";
+                    // LLM 可能传非字符串参数；用 value() 兜底，避免 get<string>() 抛异常
+                    const std::string old_str = event.args.value("oldString", std::string(""));
+                    const std::string new_str = event.args.value("newString", std::string(""));
                     // 格式：每行前加 -（删除）/ +（新增），左侧空白填充对齐
                     auto format_diff = [](const std::string& s, const char* prefix)
                     {

@@ -247,22 +247,32 @@ ExecutedToolBatch execute_tool_calls_sequential(AgentContext& context,
         }
         else
         {
-            const ToolResult executed = preparation.prepared.tool->execute(
-                tool_call.id, preparation.prepared.args, signal,
-                [&](const ToolResult& partial)
-                {
-                    AgentEvent update;
-                    update.type = AgentEvent::Type::ToolExecutionUpdate;
-                    update.toolCallId = tool_call.id;
-                    update.toolName = tool_call.name;
-                    update.args = tool_call.arguments;
-                    update.partialResult = partial;
-                    emit(update);
-                });
             FinalizedToolCallOutcome executed_outcome;
             executed_outcome.toolCall = &tool_call;
-            executed_outcome.result = executed;
-            executed_outcome.isError = false;
+            try
+            {
+                const ToolResult executed = preparation.prepared.tool->execute(
+                    tool_call.id, preparation.prepared.args, signal,
+                    [&](const ToolResult& partial)
+                    {
+                        AgentEvent update;
+                        update.type = AgentEvent::Type::ToolExecutionUpdate;
+                        update.toolCallId = tool_call.id;
+                        update.toolName = tool_call.name;
+                        update.args = tool_call.arguments;
+                        update.partialResult = partial;
+                        emit(update);
+                    });
+                executed_outcome.result = executed;
+                executed_outcome.isError = false;
+            }
+            catch (const std::exception& e)
+            {
+                // 与并行路径保持一致：工具 execute 抛异常（如 LLM 传错参数类型触发
+                // get<type>()）转为 error toolResult，而不是终结整轮对话。
+                executed_outcome.result = create_error_tool_result(e.what());
+                executed_outcome.isError = true;
+            }
             finalized = finalize_executed_tool_call(
                 context, assistant_message, preparation.prepared, executed_outcome, config, signal);
         }
@@ -446,6 +456,27 @@ Message stream_assistant_response(AgentContext& context, AgentLoopConfig& config
                                   const std::shared_ptr<std::atomic<bool>>& signal,
                                   const AgentEventSink& emit)
 {
+    if (!config.transport)
+    {
+        // 防御：Agent 未配置 transport 时不再空指针解引用，而是以 error 事件终止本轮。
+        Message failure;
+        failure.role = Role::Assistant;
+        failure.api = config.model.api;
+        failure.provider = config.model.provider;
+        failure.model = config.model.id;
+        failure.stopReason = StopReason::Error;
+        failure.errorMessage = "No transport configured";
+        AgentEvent start;
+        start.type = AgentEvent::Type::MessageStart;
+        start.message = failure;
+        emit(start);
+        AgentEvent end;
+        end.type = AgentEvent::Type::MessageEnd;
+        end.message = failure;
+        emit(end);
+        return failure;
+    }
+
     std::vector<AgentMessage> messages = context.messages;
     if (config.transformContext)
     {

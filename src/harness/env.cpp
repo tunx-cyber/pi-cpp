@@ -360,19 +360,24 @@ void PosixShell::unregister_child(pid_t pid)
 
 void PosixShell::kill_all_children()
 {
-    std::lock_guard<std::mutex> lock(children_mutex_);
-    for (pid_t pid : children_)
+    // 先在锁内快照并清空，再在锁外 kill + sleep：
+    // 避免在持锁状态下 usleep，阻塞其他线程 register/unregister_child。
+    std::vector<pid_t> children;
     {
-        // 先发 SIGTERM 给整个进程组（干净退出），再 SIGKILL 兜底
+        std::lock_guard<std::mutex> lock(children_mutex_);
+        children.assign(children_.begin(), children_.end());
+        children_.clear();
+    }
+    // 先发 SIGTERM 给整个进程组（干净退出），再 SIGKILL 兜底
+    for (pid_t pid : children)
+    {
         kill(-pid, SIGTERM);
     }
-    // 给子进程一点时间优雅退出
-    usleep(100000);  // 100ms
-    for (pid_t pid : children_)
+    usleep(100000);  // 100ms 优雅退出窗口
+    for (pid_t pid : children)
     {
         kill(-pid, SIGKILL);
     }
-    children_.clear();
 }
 
 Result<ExecResult, ExecutionError> PosixShell::exec(const std::string& command,
