@@ -46,7 +46,7 @@ REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /im
 - 输入 `/` 唤起命令菜单（实时过滤 + Tab 补全）
 - 输入：`Enter`=提交，`Shift+Enter`/`Ctrl+J`/`Option+Enter`=换行（多行输入；Shift+Enter 需终端支持 CSI-u/kitty 键盘协议：iTerm2/kitty/WezTerm）
 - 流式中：`Enter`=steer（排队下一句）、`Esc`=abort、`Ctrl+C`=退出（确认）、`Ctrl+P`=切模型、`Ctrl+L`=重绘
-- `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls / web_fetch + subagent（子 agent 嵌套）。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
+- `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls / web_fetch / web_search + subagent（子 agent 嵌套）。web_search 走 DeepSeek Anthropic 兼容 Messages API（原生 `web_search_20250305`），需 `DEEPSEEK_API_KEY`。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
 - 会话保存在 `~/.pi-cpp/agent/sessions/<cwd>/<ts>_<id>.jsonl`（pi 兼容 version-3 格式），重启后 `/resume` 恢复
 - 用户模板：`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`（支持 `$1`/`$@`/`${@:N:L}`）
 

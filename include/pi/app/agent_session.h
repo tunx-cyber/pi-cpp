@@ -58,6 +58,8 @@ class AgentSession
     double total_cost() const;
     double all_time_cost() const;
     Usage last_turn_usage() const;
+    /** 当前已解析的 API key（可能为空）。 */
+    const std::string& api_key() const { return settings_.apiKey; }
     const std::string& cwd() const { return cwd_; }
     Session& session() { return harness_.session(); }
     AgentHarness& harness() { return harness_; }

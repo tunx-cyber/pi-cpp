@@ -309,5 +309,97 @@ TEST(CodingToolsTest, WebFetchLiveInternet)
     EXPECT_NE(text.find("Example Domain"), std::string::npos);
 }
 
+TEST(CodingToolsTest, MapDeepSeekSearchResponse)
+{
+    Json response;
+    response["content"] = Json::array({
+        Json{{"type", "text"},
+             {"text", "results"},
+             {"citations",
+              Json::array({Json{{"url", "https://a.com/1"}, {"cited_text", "snippet a"}},
+                           Json{{"url", "https://b.com/2"}, {"cited_text", "snippet b"}}})}},
+        Json{{"type", "web_search_tool_result"},
+             {"content",
+              Json::array({Json{{"type", "web_search_result"},
+                                {"url", "https://a.com/1"},
+                                {"title", "A"},
+                                {"page_age", "2 days ago"}},
+                           Json{{"type", "web_search_result"},
+                                {"url", "https://b.com/2"},
+                                {"title", "B"},
+                                {"page_age", "1 hour ago"}}})}},
+        // 重复 url：应按首次出现去重
+        Json{{"type", "web_search_tool_result"},
+             {"content", Json::array({Json{{"type", "web_search_result"},
+                                           {"url", "https://a.com/1"},
+                                           {"title", "A dup"}}})}},
+    });
+
+    const auto result = map_deepseek_search_response(response, 8);
+    EXPECT_TRUE(result.error.empty());
+    EXPECT_EQ(result.sources.size(), 2u);
+    EXPECT_FALSE(result.truncated);
+    EXPECT_EQ(result.sources[0].url, "https://a.com/1");
+    EXPECT_EQ(result.sources[0].title, "A");
+    EXPECT_EQ(result.sources[0].snippet, "snippet a");
+    EXPECT_EQ(result.sources[0].publishedAt, "2 days ago");
+    EXPECT_EQ(result.sources[1].url, "https://b.com/2");
+    EXPECT_EQ(result.sources[1].snippet, "snippet b");
+    EXPECT_EQ(result.sources[1].publishedAt, "1 hour ago");
+}
+
+TEST(CodingToolsTest, MapDeepSeekSearchResponseTruncates)
+{
+    Json response;
+    response["content"] = Json::array({Json{
+        {"type", "web_search_tool_result"},
+        {"content",
+         Json::array({Json{{"type", "web_search_result"}, {"url", "https://a.com"}, {"title", "A"}},
+                      Json{{"type", "web_search_result"}, {"url", "https://b.com"}, {"title", "B"}},
+                      Json{{"type", "web_search_result"}, {"url", "https://c.com"}, {"title", "C"}}})}}});
+
+    const auto result = map_deepseek_search_response(response, 2);
+    EXPECT_TRUE(result.error.empty());
+    EXPECT_EQ(result.sources.size(), 2u);
+    EXPECT_TRUE(result.truncated);
+}
+
+TEST(CodingToolsTest, MapDeepSeekSearchResponseMissingBlocksIsError)
+{
+    Json response;
+    response["content"] = Json::array({Json{{"type", "text"}, {"text", "no results"}}});
+    const auto result = map_deepseek_search_response(response, 8);
+    EXPECT_FALSE(result.error.empty());
+    EXPECT_NE(result.error.find("no web_search_tool_result blocks"), std::string::npos);
+}
+
+TEST(CodingToolsTest, FormatSearchOutput)
+{
+    WebSearchResult result;
+    WebSearchSource a;
+    a.url = "https://a.com";
+    a.title = "A Title";
+    a.snippet = "snippet a";
+    a.publishedAt = "2 days ago";
+    WebSearchSource b;
+    b.url = "https://b.com";
+    b.snippet = "snippet b";  // 无标题 → hostname 兜底
+    result.sources = {a, b};
+    result.truncated = true;
+
+    const std::string text = format_search_output(result);
+    EXPECT_NE(text.find("- [A Title](https://a.com) — snippet a (2 days ago)"), std::string::npos);
+    EXPECT_NE(text.find("- [b.com](https://b.com) — snippet b"), std::string::npos);
+    EXPECT_NE(text.find("Showing the first 2 sources"), std::string::npos);
+    EXPECT_NE(text.find("Cite the relevant URLs"), std::string::npos);
+}
+
+TEST(CodingToolsTest, FormatSearchOutputNoResults)
+{
+    WebSearchResult result;  // 空 sources 且无 answer
+    const std::string text = format_search_output(result);
+    EXPECT_NE(text.find("No results found."), std::string::npos);
+}
+
 }  // namespace
 }  // namespace pi

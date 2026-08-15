@@ -1168,8 +1168,9 @@ void Repl::handle_command(const std::string& line)
     }
     if (name == "tools")
     {
-        session_.set_tools(make_coding_tools(cwd_));
-        std::cout << "已启用编码工具：read/bash/edit/write/grep/find/ls/web_fetch" << std::endl;
+        session_.set_tools(make_coding_tools(cwd_, session_.api_key()));
+        std::cout << "已启用编码工具：read/bash/edit/write/grep/find/ls/web_fetch/web_search"
+                  << std::endl;
         return;
     }
 

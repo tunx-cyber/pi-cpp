@@ -12,9 +12,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 
 #include "pi/harness/env.h"
@@ -256,9 +259,273 @@ CurlFetchResult fetch_url(const std::string& url, int timeout_seconds, size_t ma
     return result;
 }
 
+// ---------- web search ----------
+
+// DeepSeek Anthropic-compatible Messages API 常量（镜像 dsh-web-search-deepseek）
+constexpr const char* kWebSearchDefaultBaseUrl = "https://api.deepseek.com/anthropic/v1";
+constexpr const char* kWebSearchDefaultModel = "deepseek-v4-flash";
+constexpr const char* kWebSearchApiVersion = "2023-06-01";
+constexpr int kWebSearchMaxTokens = 4096;
+constexpr int kWebSearchMaxUses = 5;
+constexpr int kWebSearchMaxResults = 8;
+
+/** 从 URL 提取 host（"://" 之后到第一个 / ? # 之间），作为无标题来源的兜底标签。 */
+std::string hostname_of(const std::string& url)
+{
+    const size_t scheme = url.find("://");
+    const size_t start = scheme == std::string::npos ? 0 : scheme + 3;
+    const size_t slash = url.find_first_of("/?#", start);
+    return url.substr(start, slash == std::string::npos ? std::string::npos : slash - start);
+}
+
+/**
+ * DeepSeek 原生 web search（镜像 DeepSeekSearchProvider.search）：经 Anthropic 兼容
+ * Messages API 调用 web_search_20250305 server tool，解析结构化结果块。
+ * 不得抛异常——失败以 WebSearchResult::error 返回；abort 经 progress callback 中止。
+ */
+WebSearchResult deepseek_web_search(const std::string& query, const std::string& apiKey,
+                                    const std::shared_ptr<std::atomic<bool>>& signal)
+{
+    WebSearchResult result;
+    if (apiKey.empty())
+    {
+        result.error =
+            "Missing API key. Set PI_API_KEY or DEEPSEEK_API_KEY before using web_search.";
+        return result;
+    }
+
+    std::string base_url = kWebSearchDefaultBaseUrl;
+    if (const char* env = std::getenv("DEEPSEEK_SEARCH_BASE_URL"); env && *env)
+    {
+        base_url = env;
+    }
+    const std::string endpoint = base_url + "/messages";
+
+    // 请求体：镜像 DeepSeekSearchLlmRequest
+    Json body;
+    body["model"] = kWebSearchDefaultModel;
+    body["max_tokens"] = kWebSearchMaxTokens;
+    body["messages"] = Json::array({Json{
+        {"role", "user"},
+        {"content", Json::array({Json{{"type", "text"},
+                                       {"text", "Perform a web search for the query: " + query}}})}}});
+    body["tools"] = Json::array({Json{{"type", "web_search_20250305"},
+                                      {"name", "web_search"},
+                                      {"max_uses", kWebSearchMaxUses}}});
+    const std::string body_json = body.dump();
+
+    CURL* curl = curl_easy_init();
+    if (!curl)
+    {
+        result.error = "curl_easy_init failed";
+        return result;
+    }
+
+    // 官方端点期望 x-api-key；Anthropic 兼容代理可能期望 Authorization——两者都发。
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, ("x-api-key: " + apiKey).c_str());
+    headers = curl_slist_append(headers, ("authorization: Bearer " + apiKey).c_str());
+    headers = curl_slist_append(
+        headers, ("anthropic-version: " + std::string(kWebSearchApiVersion)).c_str());
+    headers = curl_slist_append(headers, "content-type: application/json");
+    headers = curl_slist_append(headers, "accept: application/json");
+
+    CurlWriteContext ctx;
+    ctx.maxBytes = 5 * 1024 * 1024;  // 5MB
+
+    curl_easy_setopt(curl, CURLOPT_URL, endpoint.c_str());
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_json.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body_json.size()));
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 30000L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curl_progress_callback);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, signal.get());
+
+    const CURLcode res = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res == CURLE_ABORTED_BY_CALLBACK)
+    {
+        result.error = "aborted";
+        return result;
+    }
+    if (res != CURLE_OK)
+    {
+        result.error = std::string("search request failed: ") + curl_easy_strerror(res);
+        return result;
+    }
+    if (status < 200 || status >= 300)
+    {
+        std::string message = "DeepSeek search API error (HTTP " + std::to_string(status) + ")";
+        try
+        {
+            const Json err = Json::parse(ctx.body);
+            std::string detail;
+            if (err.contains("error"))
+            {
+                if (err["error"].is_string()) detail = err["error"].get<std::string>();
+                else if (err["error"].is_object() && err["error"].contains("message") &&
+                         err["error"]["message"].is_string())
+                    detail = err["error"]["message"].get<std::string>();
+            }
+            else if (err.contains("message") && err["message"].is_string())
+            {
+                detail = err["message"].get<std::string>();
+            }
+            if (!detail.empty()) message = detail;
+        }
+        catch (...)
+        {
+        }
+        result.error = message;
+        return result;
+    }
+
+    Json response;
+    try
+    {
+        response = Json::parse(ctx.body);
+    }
+    catch (...)
+    {
+        result.error = "DeepSeek returned an unprocessable response body";
+        return result;
+    }
+
+    return map_deepseek_search_response(response, kWebSearchMaxResults);
+}
+
 }  // namespace
 
-std::vector<AgentTool> make_coding_tools(const std::string& cwd)
+/** 将 DeepSeek Anthropic Messages 响应映射为标准化搜索结果（镜像 mapAnthropicResponse）。 */
+WebSearchResult map_deepseek_search_response(const Json& response, int maxResults)
+{
+    WebSearchResult result;
+    if (!response.is_object() || !response.contains("content") || !response["content"].is_array())
+    {
+        result.error =
+            "DeepSeek returned no web_search_tool_result blocks; the request may not have "
+            "triggered native web search";
+        return result;
+    }
+
+    // text 块的 citations 是 snippet 来源：url → cited_text（首次出现优先）
+    std::map<std::string, std::string> snippets;
+    std::vector<WebSearchSource> sources;
+    std::set<std::string> seen;
+
+    for (const auto& block : response["content"])
+    {
+        if (!block.is_object()) continue;
+        const std::string type = block.value("type", "");
+        if (type == "text")
+        {
+            if (block.contains("citations") && block["citations"].is_array())
+            {
+                for (const auto& cite : block["citations"])
+                {
+                    if (!cite.is_object()) continue;
+                    const std::string url = cite.value("url", "");
+                    const std::string cited_text = cite.value("cited_text", "");
+                    if (!url.empty() && !cited_text.empty() && snippets.find(url) == snippets.end())
+                    {
+                        snippets[url] = cited_text;
+                    }
+                }
+            }
+        }
+        else if (type == "web_search_tool_result")
+        {
+            if (!block.contains("content") || !block["content"].is_array()) continue;
+            for (const auto& item : block["content"])
+            {
+                if (!item.is_object()) continue;
+                if (item.value("type", "") != "web_search_result") continue;
+                const std::string url = item.value("url", "");
+                if (url.empty() || seen.count(url)) continue;
+                seen.insert(url);
+                WebSearchSource src;
+                src.url = url;
+                src.title = item.value("title", "");
+                src.publishedAt = item.value("page_age", "");
+                const auto it = snippets.find(url);
+                if (it != snippets.end()) src.snippet = it->second;
+                sources.push_back(std::move(src));
+            }
+        }
+    }
+
+    if (sources.empty())
+    {
+        result.error =
+            "DeepSeek returned no web_search_tool_result blocks; the request may not have "
+            "triggered native web search";
+        return result;
+    }
+
+    if (maxResults > 0 && static_cast<int>(sources.size()) > maxResults)
+    {
+        sources.resize(static_cast<size_t>(maxResults));
+        result.truncated = true;
+    }
+    result.sources = std::move(sources);
+    return result;
+}
+
+/** 将搜索结果格式化为面向模型的 markdown 文本（镜像 formatSearchOutput）。 */
+std::string format_search_output(const WebSearchResult& result)
+{
+    std::vector<std::string> parts;
+    if (!result.content.empty()) parts.push_back(result.content);
+
+    if (!result.sources.empty())
+    {
+        std::string lines;
+        for (const auto& source : result.sources)
+        {
+            const std::string label = source.title.empty() ? hostname_of(source.url) : source.title;
+            std::vector<std::string> meta;
+            if (!source.snippet.empty()) meta.push_back(source.snippet);
+            if (!source.publishedAt.empty()) meta.push_back("(" + source.publishedAt + ")");
+            std::string suffix;
+            for (size_t i = 0; i < meta.size(); ++i)
+            {
+                suffix += (i == 0 ? " — " : " ") + meta[i];
+            }
+            lines += "- [" + label + "](" + source.url + ")" + suffix + "\n";
+        }
+        parts.push_back("Sources:\n" + lines);
+    }
+    else if (result.content.empty())
+    {
+        parts.push_back("No results found.");
+    }
+
+    if (result.truncated)
+    {
+        parts.push_back("(Showing the first " + std::to_string(result.sources.size()) +
+                        " sources. Refine the query for more.)");
+    }
+    parts.push_back("Cite the relevant URLs above as markdown links in your answer.");
+
+    std::string out;
+    for (size_t i = 0; i < parts.size(); ++i)
+    {
+        if (i > 0) out += "\n\n";
+        out += parts[i];
+    }
+    return out;
+}
+
+std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::string& apiKey)
 {
     const std::string workspace = detect_workspace_root(cwd);
     std::vector<AgentTool> tools;
@@ -699,6 +966,40 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd)
             {
                 return fail(std::string("invalid arguments: ") + e.what());
             }
+        }));
+
+    tools.push_back(make_tool(
+        "web_search",
+        "Search the web for current information. Returns an optional summary answer and a list "
+        "of source URLs.",
+        Json{{"type", "object"},
+             {"properties",
+              Json{{"query", Json{{"type", "string"}, {"description", "The search query."}}}}},
+             {"required", Json::array({"query"})}},
+        [apiKey](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+        {
+            ToolResult result;
+            const std::string query = args.value("query", "");
+            if (query.empty() || query.find_first_not_of(" \t\r\n") == std::string::npos)
+            {
+                result.content.push_back(ContentBlock{});
+                result.content.back().type = BlockType::Text;
+                result.content.back().text =
+                    "[web_search error] query must be a non-empty string";
+                return result;
+            }
+            const auto search = deepseek_web_search(query, apiKey, signal);
+            result.content.push_back(ContentBlock{});
+            result.content.back().type = BlockType::Text;
+            if (!search.error.empty())
+            {
+                result.content.back().text = "[web_search error] " + search.error;
+            }
+            else
+            {
+                result.content.back().text = format_search_output(search);
+            }
+            return result;
         }));
 
     return tools;
