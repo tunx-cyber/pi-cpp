@@ -31,7 +31,7 @@ ProcessMemoryUsage parse_proc_status_memory(std::string_view status);
 /** 将字节数格式化为稳定、适合终端展示的二进制单位。 */
 std::string format_memory_bytes(uint64_t bytes);
 
-/** 将内存快照格式化为 "rss=... vms=..."。 */
+/** 将内存快照格式化为驻留内存数值（如 "128 MiB"），不可用时返回 "unavailable"。 */
 std::string format_process_memory(const ProcessMemoryUsage& usage);
 
 }  // namespace pi

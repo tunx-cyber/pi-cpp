@@ -122,16 +122,10 @@ std::string format_memory_bytes(uint64_t bytes)
 
 std::string format_process_memory(const ProcessMemoryUsage& usage)
 {
-    if (!usage.hasResident && !usage.hasVirtual) return "unavailable";
-
-    std::string result;
-    if (usage.hasResident) result += "rss=" + format_memory_bytes(usage.residentBytes);
-    if (usage.hasVirtual)
-    {
-        if (!result.empty()) result += " ";
-        result += "vms=" + format_memory_bytes(usage.virtualBytes);
-    }
-    return result;
+    // 只展示进程实际占用的驻留内存（macOS phys_footprint / Linux VmRSS）。
+    // 不再展示 virtual_size：Apple Silicon 的稀疏映射可达数百 GiB，属正常现象而非实际占用。
+    if (!usage.hasResident) return "unavailable";
+    return format_memory_bytes(usage.residentBytes);
 }
 
 }  // namespace pi

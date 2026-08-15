@@ -87,7 +87,7 @@ std::string status_text(const AgentSession& session, const ProcessMemoryUsage& m
     out += " [mem " + format_process_memory(memory);
     if (peak_memory.hasResident)
     {
-        out += " peak_rss=" + format_memory_bytes(peak_memory.residentBytes);
+        out += " peak=" + format_memory_bytes(peak_memory.residentBytes);
     }
     out += "]";
     return out;
@@ -570,12 +570,6 @@ ProcessMemoryUsage Repl::sample_memory()
     {
         peak_memory_.residentBytes = current.residentBytes;
         peak_memory_.hasResident = true;
-    }
-    if (current.hasVirtual &&
-        (!peak_memory_.hasVirtual || current.virtualBytes > peak_memory_.virtualBytes))
-    {
-        peak_memory_.virtualBytes = current.virtualBytes;
-        peak_memory_.hasVirtual = true;
     }
     return current;
 }
@@ -1147,11 +1141,7 @@ void Repl::handle_command(const std::string& line)
         std::cout << "Memory: " << format_process_memory(current);
         if (peak_memory_.hasResident)
         {
-            std::cout << " peak_rss=" << format_memory_bytes(peak_memory_.residentBytes);
-        }
-        if (peak_memory_.hasVirtual)
-        {
-            std::cout << " peak_vms=" << format_memory_bytes(peak_memory_.virtualBytes);
+            std::cout << " (peak " << format_memory_bytes(peak_memory_.residentBytes) << ")";
         }
         std::cout << std::endl;
         return;

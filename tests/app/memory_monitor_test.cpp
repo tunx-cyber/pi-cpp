@@ -32,7 +32,7 @@ TEST(MemoryMonitorTest, FormatsMemoryForTerminal)
     EXPECT_EQ(format_memory_bytes(0), "0 B");
     EXPECT_EQ(format_memory_bytes(1536), "1.5 KiB");
     EXPECT_EQ(format_memory_bytes(128ULL * 1024ULL * 1024ULL), "128 MiB");
-    EXPECT_EQ(format_process_memory({2ULL * 1024ULL * 1024ULL, 0, true, false}), "rss=2.0 MiB");
+    EXPECT_EQ(format_process_memory({2ULL * 1024ULL * 1024ULL, 0, true, false}), "2.0 MiB");
 }
 
 TEST(MemoryMonitorTest, SamplesTheRunningProcessWhenSupported)
