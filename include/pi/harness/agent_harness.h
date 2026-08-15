@@ -39,8 +39,10 @@ class AgentHarness
    public:
     explicit AgentHarness(AgentHarnessOptions options);
 
-    /** 从会话恢复上下文（model/thinkingLevel/消息）。 */
+    /** 从会话恢复上下文（model/thinkingLevel/消息）；等价于 reload()。 */
     void resume();
+    /** 无条件重新加载当前会话上下文到 agent（/resume 与切换会话时使用）。 */
+    void reload();
 
     void prompt(const std::string& text);
     void prompt_messages(const std::vector<AgentMessage>& messages);
@@ -89,10 +91,11 @@ class AgentHarness
     std::function<std::optional<std::string>(const ModelInfo&)> get_api_key_;
     ModelInfo model_;
     ThinkingLevel thinking_level_;
+    ModelInfo default_model_;             // 构造时确定，reload() 先恢复默认再按会话覆盖
+    ThinkingLevel default_thinking_level_;
     CompactionSettings compaction_settings_;
     mutable std::mutex cost_mutex_;  // 保护 total_cost_（跨线程读写）
     double total_cost_ = 0;
-    bool resumed_ = false;
 };
 
 }  // namespace pi

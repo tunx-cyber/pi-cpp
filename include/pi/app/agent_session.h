@@ -26,6 +26,12 @@ class AgentSession
     void new_session();
     /** 恢复 cwd 下最新会话；无会话时新建。 */
     void resume();
+    /** 按会话 id（精确或前缀）恢复；找不到返回 false 并写入 errorOut。 */
+    bool resume_by_id(const std::string& id, std::string* errorOut = nullptr);
+    /** 按 /sessions 列表序号（0 = 最新）恢复；越界返回 false。 */
+    bool resume_by_index(int index, std::string* errorOut = nullptr);
+    /** 当前会话 id（空串表示尚未创建会话）。 */
+    std::string current_session_id() const;
 
     void prompt(const std::string& text, const std::vector<ContentBlock>& images = {});
     void steer(AgentMessage message);
@@ -61,6 +67,8 @@ class AgentSession
    private:
     std::optional<std::string> resolve_api_key() const;
     ModelInfo resolve_model() const;
+    bool open_and_load(const SessionMetadata& metadata, std::string* errorOut);
+    void reset_turn_cost();
 
     Settings settings_;
     std::string cwd_;

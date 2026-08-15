@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "pi/app/agent_session.h"
 #include "pi/app/commands.h"
@@ -22,29 +23,40 @@ int main(int argc, char** argv)
         cwd = buf;
     }
 
-    // 管道模式：`echo "hello" | pi_repl` 或 `pi_repl "prompt" [--image path]`（一次性对话）
-    if (!isatty(STDIN_FILENO) || argc > 1)
+    // 解析参数：--image <path> / --resume [id] / 位置参数 prompt
+    std::string prompt;
+    std::vector<std::string> image_paths;
+    std::string resume_id;  // 空 = 恢复最近会话
+    for (int i = 1; i < argc; ++i)
     {
-        std::string prompt;
-        std::vector<std::string> image_paths;
-        for (int i = 1; i < argc; ++i)
+        const std::string arg = argv[i];
+        if (arg == "--image" && i + 1 < argc)
         {
-            if (std::string(argv[i]) == "--image" && i + 1 < argc)
+            image_paths.push_back(argv[++i]);
+        }
+        else if (arg == "--resume")
+        {
+            // --resume [id]：下一个非选项参数作为会话 id（支持前缀）；
+            // 不带 id 时等价于默认（恢复最近会话）。
+            if (i + 1 < argc && argv[i + 1][0] != '-')
             {
-                image_paths.push_back(argv[++i]);
-            }
-            else if (prompt.empty())
-            {
-                prompt = argv[i];
+                resume_id = argv[++i];
             }
         }
-        if (prompt.empty() && isatty(STDIN_FILENO))
+        else if (prompt.empty())
         {
-            // 交互式 TTY 但只给了 --image 而无 prompt：无内容可处理，直接退出
-            std::cerr << "no prompt provided" << std::endl;
-            return 1;
+            prompt = arg;
         }
-        if (prompt.empty())
+    }
+
+    const bool piped_stdin = !isatty(STDIN_FILENO);
+    // 一次性对话：管道输入、位置 prompt、或 --image（无 prompt 时读 stdin）。
+    // 注意：--resume 单独出现（无 prompt/图片/管道）时进入交互式 REPL。
+    const bool one_shot = piped_stdin || !prompt.empty() || !image_paths.empty();
+
+    if (one_shot)
+    {
+        if (prompt.empty() && piped_stdin)
         {
             std::string line;
             while (std::getline(std::cin, line))
@@ -53,11 +65,28 @@ int main(int argc, char** argv)
                 prompt += line;
             }
         }
-        if (prompt.empty()) return 0;
+        if (prompt.empty())
+        {
+            // 交互式 TTY 只给了 --image 而无 prompt：无内容可处理，直接退出
+            std::cerr << "no prompt provided" << std::endl;
+            return 1;
+        }
 
         pi::Settings settings = pi::Settings::load();
         pi::AgentSession session(settings, cwd);
-        session.resume();
+        if (!resume_id.empty())
+        {
+            std::string error;
+            if (!session.resume_by_id(resume_id, &error))
+            {
+                std::cerr << "恢复会话失败：" << error << std::endl;
+                return 1;
+            }
+        }
+        else
+        {
+            session.resume();
+        }
         session.set_tools(pi::make_coding_tools(cwd));
 
         // 流式输出到 stdout，结束打印 usage/计费
@@ -108,9 +137,22 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    // 交互式 REPL
     pi::Settings settings = pi::Settings::load();
     pi::AgentSession session(settings, cwd);
-    session.resume();
+    if (!resume_id.empty())
+    {
+        std::string error;
+        if (!session.resume_by_id(resume_id, &error))
+        {
+            std::cerr << "恢复会话失败：" << error << std::endl;
+            return 1;
+        }
+    }
+    else
+    {
+        session.resume();
+    }
     pi::Repl repl(session, cwd);
     return repl.run();
 }

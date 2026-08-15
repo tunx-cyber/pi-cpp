@@ -266,6 +266,8 @@ struct SessionMetadata
     std::string cwd;
     std::string path;
     std::string parentSessionPath;
+    std::string preview;   // 首个用户消息预览（/sessions 与 --resume 展示用）
+    int messageCount = 0;  // 会话消息条数
 };
 
 // ---------- Skills / Templates ----------

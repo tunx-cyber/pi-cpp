@@ -31,11 +31,17 @@ echo "hello" | ./build/picpp
 
 # 图片输入（deepseek 当前不支持图片，自动降级为占位文本）
 ./build/picpp "这是什么" --image photo.png
+
+# 恢复到指定历史会话继续对话（id 支持前缀；不带 id 恢复最近会话）
+./build/picpp --resume <id> "继续刚才的任务"
 ```
 
 API key 自动从以下位置读取（优先级从低到高）：`~/.pi-cpp/.env`、当前目录向上最近的项目 `.env`（`DEEPSEEK_API_KEY` / `OPENAI_API_KEY`）、环境变量 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `PI_API_KEY`。端点/模型可用 `PI_BASE_URL` / `PI_MODEL` 覆盖。
 
 REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /quit`。
+
+- `/sessions` 列出历史会话（序号 / 时间 / 首条消息预览 / 消息数，标出当前会话）
+- `/resume` 恢复最近会话；`/resume <序号>` 或 `/resume <id 前缀>` 恢复到指定会话（类似 `claude --resume`）
 
 - 输入 `/` 唤起命令菜单（实时过滤 + Tab 补全）
 - 输入：`Enter`=提交，`Shift+Enter`/`Ctrl+J`/`Option+Enter`=换行（多行输入；Shift+Enter 需终端支持 CSI-u/kitty 键盘协议：iTerm2/kitty/WezTerm）

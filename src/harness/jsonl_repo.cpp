@@ -39,6 +39,36 @@ std::string encode_cwd(const std::string& cwd)
     return out;
 }
 
+/** 将首条用户消息折叠为单行预览（换行→空格、压缩空白、UTF-8 边界截断）。 */
+std::string one_line_preview(const std::string& text)
+{
+    std::string collapsed;
+    bool prev_space = true;  // 起始按"前导空白"处理，跳过前导空格
+    for (char c : text)
+    {
+        const char ch = (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+        if (ch == ' ')
+        {
+            if (prev_space) continue;
+            prev_space = true;
+        }
+        else
+        {
+            prev_space = false;
+        }
+        collapsed += ch;
+    }
+    // 去尾部空白
+    while (!collapsed.empty() && collapsed.back() == ' ') collapsed.pop_back();
+
+    constexpr size_t kMaxPreview = 80;
+    if (collapsed.size() <= kMaxPreview) return collapsed;
+    size_t end = kMaxPreview;
+    // 回退到 UTF-8 字符边界，避免切断多字节字符
+    while (end > 0 && (static_cast<unsigned char>(collapsed[end]) & 0xC0) == 0x80) --end;
+    return collapsed.substr(0, end) + "…";
+}
+
 }  // namespace
 
 JsonlSessionRepo::JsonlSessionRepo(FileSystem& fs, std::string sessionsRoot)
@@ -194,7 +224,22 @@ Result<std::vector<SessionMetadata>, SessionError> JsonlSessionRepo::list(
             if (file.name.compare(file.name.size() - 6, 6, ".jsonl") != 0) continue;
             const auto storage = JsonlSessionStorage::open(fs_, file.path);
             if (!storage.ok) continue;  // 跳过损坏的会话
-            sessions.push_back(storage.value.metadata());
+            SessionMetadata metadata = storage.value.metadata();
+            // 计算预览（首个用户消息）与消息条数，供 /sessions 与 --resume 展示
+            const auto entries = storage.value.get_entries();
+            if (entries.ok)
+            {
+                for (const auto& entry : entries.value)
+                {
+                    if (entry.type != SessionTreeEntry::Type::Message) continue;
+                    ++metadata.messageCount;
+                    if (metadata.preview.empty() && entry.message.role == Role::User)
+                    {
+                        metadata.preview = one_line_preview(entry.message.text_content());
+                    }
+                }
+            }
+            sessions.push_back(std::move(metadata));
         }
     }
     std::sort(sessions.begin(), sessions.end(),

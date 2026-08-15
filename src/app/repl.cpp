@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <vector>
 
@@ -43,8 +44,8 @@ const std::vector<CommandEntry>& builtin_command_entries()
         {"compact", "手动压缩会话"},
         {"clear", "清空会话"},
         {"new", "新会话"},
-        {"resume", "恢复最近会话"},
-        {"sessions", "列出会话"},
+        {"resume", "恢复会话（/resume 最近；/resume <序号|id> 指定）"},
+        {"sessions", "列出历史会话（序号/时间/预览/消息数）"},
         {"image", "图片输入"},
         {"tools", "启用编码工具（read/bash/edit/write/grep/find/ls/web_fetch + subagent）"},
         {"skills", "列出 skills"},
@@ -52,6 +53,27 @@ const std::vector<CommandEntry>& builtin_command_entries()
         {"quit", "退出"},
     };
     return entries;
+}
+
+/** ISO 时间 "2026-08-15T14:30:00.123Z" → "2026-08-15 14:30:00"。 */
+std::string format_session_time(const std::string& iso)
+{
+    if (iso.size() < 19) return iso;
+    return iso.substr(0, 10) + " " + iso.substr(11, 8);
+}
+
+/** 严格非负整数解析（空串/非数字/溢出返回 nullopt）。 */
+std::optional<int> parse_uint(const std::string& s)
+{
+    if (s.empty()) return std::nullopt;
+    int value = 0;
+    for (char c : s)
+    {
+        if (c < '0' || c > '9') return std::nullopt;
+        if (value > (2147483647 - (c - '0')) / 10) return std::nullopt;
+        value = value * 10 + (c - '0');
+    }
+    return value;
 }
 
 std::string status_text(const AgentSession& session, const ProcessMemoryUsage& memory,
@@ -1040,8 +1062,38 @@ void Repl::handle_command(const std::string& line)
     }
     if (name == "resume")
     {
-        session_.resume();
-        std::cout << "已恢复最近会话（" << session_.messages().size() << " 条消息）" << std::endl;
+        std::string arg;
+        if (space != std::string::npos)
+        {
+            const size_t a = line.find_first_not_of(" \t", space + 1);
+            if (a != std::string::npos) arg = line.substr(a);
+        }
+        if (arg.empty())
+        {
+            session_.resume();
+            std::cout << "已恢复最近会话（" << session_.messages().size() << " 条消息）" << std::endl;
+        }
+        else
+        {
+            std::string error;
+            bool ok = false;
+            if (const auto idx = parse_uint(arg))
+            {
+                ok = session_.resume_by_index(*idx, &error);
+            }
+            else
+            {
+                ok = session_.resume_by_id(arg, &error);
+            }
+            if (ok)
+            {
+                std::cout << "已恢复会话（" << session_.messages().size() << " 条消息）" << std::endl;
+            }
+            else
+            {
+                std::cout << "恢复失败：" << error << std::endl;
+            }
+        }
         return;
     }
     if (name == "new")
@@ -1053,10 +1105,23 @@ void Repl::handle_command(const std::string& line)
     if (name == "sessions")
     {
         const auto sessions = session_.list_sessions();
-        std::cout << "会话（" << sessions.size() << "）：" << std::endl;
-        for (const auto& s : sessions)
+        if (sessions.empty())
         {
-            std::cout << "  " << s.createdAt << " " << s.id << " " << s.path << std::endl;
+            std::cout << "没有会话（当前目录 " << cwd_ << "）" << std::endl;
+            return;
+        }
+        const std::string current = session_.current_session_id();
+        std::cout << "会话（" << sessions.size() << "，当前目录 " << cwd_ << "）：" << std::endl;
+        std::cout << "  /resume <序号|id> 恢复到指定会话" << std::endl;
+        for (size_t i = 0; i < sessions.size(); ++i)
+        {
+            const auto& s = sessions[i];
+            const bool is_current = (s.id == current);
+            std::cout << "  [" << i << "] " << format_session_time(s.createdAt);
+            if (!s.preview.empty()) std::cout << "  \"" << s.preview << "\"";
+            std::cout << "  (" << s.messageCount << " 条消息)  id=" << s.id.substr(0, 8);
+            if (is_current) std::cout << "  ← 当前";
+            std::cout << std::endl;
         }
         return;
     }

@@ -105,9 +105,7 @@ void AgentSession::new_session()
     harness_.reset();
     harness_.set_model(resolve_model());
     harness_.set_thinking_level(settings_.thinking);
-    std::lock_guard<std::mutex> lock(cost_mutex_);
-    total_cost_ = 0;
-    last_turn_usage_ = Usage{};
+    reset_turn_cost();
 }
 
 void AgentSession::resume()
@@ -115,15 +113,66 @@ void AgentSession::resume()
     const auto sessions = repo_.list(cwd_);
     if (sessions.ok && !sessions.value.empty())
     {
-        const auto opened = repo_.open(sessions.value[0]);
-        if (opened.ok)
+        std::string error;
+        if (open_and_load(sessions.value[0], &error))
         {
-            harness_.session() = opened.value;
-            harness_.resume();
             return;
         }
     }
     new_session();
+}
+
+bool AgentSession::resume_by_id(const std::string& id, std::string* errorOut)
+{
+    if (id.empty())
+    {
+        if (errorOut) *errorOut = "会话 id 不能为空";
+        return false;
+    }
+    const auto sessions = repo_.list(cwd_);
+    if (!sessions.ok || sessions.value.empty())
+    {
+        if (errorOut) *errorOut = "没有可恢复的会话（可用 /sessions 查看）";
+        return false;
+    }
+    const SessionMetadata* target = nullptr;
+    for (const auto& s : sessions.value)
+    {
+        if (s.id == id)
+        {
+            target = &s;
+            break;
+        }
+    }
+    if (!target)
+    {
+        // 支持 id 前缀匹配（uuid 前缀足够唯一即可）
+        for (const auto& s : sessions.value)
+        {
+            if (s.id.compare(0, id.size(), id) == 0)
+            {
+                target = &s;
+                break;
+            }
+        }
+    }
+    if (!target)
+    {
+        if (errorOut) *errorOut = "未找到会话 id：" + id;
+        return false;
+    }
+    return open_and_load(*target, errorOut);
+}
+
+bool AgentSession::resume_by_index(int index, std::string* errorOut)
+{
+    const auto sessions = repo_.list(cwd_);
+    if (!sessions.ok || index < 0 || index >= static_cast<int>(sessions.value.size()))
+    {
+        if (errorOut) *errorOut = "会话序号越界（可用 /sessions 查看）";
+        return false;
+    }
+    return open_and_load(sessions.value[index], errorOut);
 }
 
 void AgentSession::prompt(const std::string& text, const std::vector<ContentBlock>& images)
@@ -154,9 +203,7 @@ void AgentSession::abort() { harness_.abort(); }
 void AgentSession::reset()
 {
     harness_.reset();
-    std::lock_guard<std::mutex> lock(cost_mutex_);
-    total_cost_ = 0;
-    last_turn_usage_ = Usage{};
+    reset_turn_cost();
 }
 
 double AgentSession::total_cost() const
@@ -236,6 +283,11 @@ std::vector<SessionMetadata> AgentSession::list_sessions() const
     return sessions.value;
 }
 
+std::string AgentSession::current_session_id() const
+{
+    return harness_.session().metadata().id;
+}
+
 std::vector<AgentMessage> AgentSession::messages() const { return harness_.messages(); }
 
 ModelInfo AgentSession::model() const { return harness_.model(); }
@@ -247,6 +299,27 @@ std::string AgentSession::system_prompt() const { return harness_.system_prompt(
 std::function<void()> AgentSession::subscribe(AgentEventListener listener)
 {
     return harness_.subscribe(std::move(listener));
+}
+
+bool AgentSession::open_and_load(const SessionMetadata& metadata, std::string* errorOut)
+{
+    const auto opened = repo_.open(metadata);
+    if (!opened.ok)
+    {
+        if (errorOut) *errorOut = opened.error.message;
+        return false;
+    }
+    harness_.session() = opened.value;
+    harness_.reload();
+    reset_turn_cost();
+    return true;
+}
+
+void AgentSession::reset_turn_cost()
+{
+    std::lock_guard<std::mutex> lock(cost_mutex_);
+    total_cost_ = 0;
+    last_turn_usage_ = Usage{};
 }
 
 }  // namespace pi

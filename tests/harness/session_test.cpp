@@ -256,5 +256,53 @@ TEST_F(SessionTest, ConcurrentAppendsKeepLinearHistory)
     }
 }
 
+TEST_F(SessionTest, ListSessionsPopulatesPreviewAndMessageCount)
+{
+    JsonlSessionRepo repo(*fs_, root_ + "/sessions");
+
+    // 会话 1：多行首条用户消息 + 一条 assistant（共 2 条消息）
+    const auto created = repo.create(root_);
+    ASSERT_TRUE(created.ok);
+    auto s1 = created.value;
+    ASSERT_TRUE(s1.append_message(Message::user("line one\nline  two\tthree")).ok);
+    Message assistant;
+    assistant.role = Role::Assistant;
+    assistant.stopReason = StopReason::Stop;
+    assistant.content.push_back(ContentBlock{});
+    assistant.content.back().type = BlockType::Text;
+    assistant.content.back().text = "reply";
+    ASSERT_TRUE(s1.append_message(assistant).ok);
+
+    // 会话 2：超长首条消息（>80 字符，应截断）
+    const std::string long_text(200, 'x');
+    const auto created2 = repo.create(root_);
+    ASSERT_TRUE(created2.ok);
+    auto s2 = created2.value;
+    ASSERT_TRUE(s2.append_message(Message::user(long_text)).ok);
+
+    const auto listed = repo.list(root_);
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value.size(), 2u);
+
+    // 通过 id 定位（时间戳可能同毫秒，顺序按 id 兜底，不依赖创建先后）
+    const SessionMetadata* meta1 = nullptr;
+    const SessionMetadata* meta2 = nullptr;
+    for (const auto& m : listed.value)
+    {
+        if (m.id == s1.metadata().id) meta1 = &m;
+        if (m.id == s2.metadata().id) meta2 = &m;
+    }
+    ASSERT_NE(meta1, nullptr);
+    ASSERT_NE(meta2, nullptr);
+
+    // 预览：换行/制表符折叠为单空格，连续空白压缩
+    EXPECT_EQ(meta1->preview, "line one line two three");
+    EXPECT_EQ(meta1->messageCount, 2);
+    // 长文本按 80 字符截断（UTF-8 边界安全）
+    EXPECT_GT(meta2->preview.size(), 80u);
+    EXPECT_EQ(meta2->preview.substr(0, 80), std::string(80, 'x'));
+    EXPECT_EQ(meta2->messageCount, 1);
+}
+
 }  // namespace
 }  // namespace pi

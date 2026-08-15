@@ -17,6 +17,8 @@ AgentHarness::AgentHarness(AgentHarnessOptions options)
       thinking_level_(options.thinkingLevel),
       compaction_settings_(options.compactionSettings)
 {
+    default_model_ = model_;
+    default_thinking_level_ = thinking_level_;
     agent_.set_system_prompt(build_system_prompt());
     agent_.set_model(model_);
     agent_.set_thinking_level(thinking_level_);
@@ -49,8 +51,18 @@ std::string AgentHarness::build_system_prompt() const
 
 void AgentHarness::resume()
 {
-    if (resumed_) return;
-    resumed_ = true;
+    reload();
+}
+
+void AgentHarness::reload()
+{
+    // 先恢复构造时的默认模型/thinking，再按会话记录覆盖：避免从"改过模型的会话"
+    // 切到"未记录模型/thinking 的会话"时残留上一会话的模型与 thinking。
+    model_ = default_model_;
+    thinking_level_ = default_thinking_level_;
+    agent_.set_model(model_);
+    agent_.set_thinking_level(thinking_level_);
+
     const auto context = session_.build_context();
     if (!context.ok) return;
     const auto& ctx = context.value;
@@ -83,15 +95,11 @@ void AgentHarness::resume()
                 }
             }
         }
-        if (!active.empty())
-        {
-            agent_.set_tools(active);
-        }
+        agent_.set_tools(std::move(active));
     }
-    if (!ctx.messages.empty())
-    {
-        agent_.set_messages(ctx.messages);
-    }
+    // 总是设置消息（即使为空），保证切换到空会话时清空 transcript。
+    // 此前 /resume 有 resumed_ 守卫，二次调用是 no-op；现在 reload() 可重复执行。
+    agent_.set_messages(ctx.messages);
 }
 
 void AgentHarness::prompt(const std::string& text)
