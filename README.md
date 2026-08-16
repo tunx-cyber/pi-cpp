@@ -12,7 +12,7 @@ pi（TypeScript 终端 Agent）的 C++ 移植版。最核心的 agent 功能：�
 
 ## 构建
 
-依赖：CMake ≥ 3.16、Ninja、clang、libcurl。第三方库（nlohmann-json、openai-cpp、valijson、googletest）由 FetchContent 自动下载；stb 已 vendor 在 `third_party/stb/`（纯 header，无需下载）。
+依赖：CMake ≥ 3.16、Ninja、clang、libcurl。第三方库（openai-cpp、googletest）由 FetchContent 自动下载；nlohmann-json、stb 已 vendor 在 `third_party/`（纯 header，无需下载）；工具参数 JSON Schema 校验为项目内置轻量实现（不依赖 valijson）。
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -62,7 +62,7 @@ include/pi/
 │             cost：价格/1e6 × token（纯函数）；sse_parser：独立 SSE 帧解析
 ├── agent/    Agent（prompt/continue/steer/followUp/abort/reset/subscribe/waitForIdle）
 │             agent_loop（双队列注入时机、串/并行工具批次、钩子、terminate 语义）
-│             json_schema（valijson 校验）、subagent_tool（嵌套/事件转发/abort 链/深度轮次防护）
+│             json_schema（内置轻量 JSON Schema 校验）、subagent_tool（嵌套/事件转发/abort 链/深度轮次防护）
 ├── harness/  Session（JSONL version-3，leaf 跟踪）+ JsonlSessionRepo
 │             compaction（切点/估算/摘要）、skills（SKILL.md）、prompt_templates
 │             AgentHarness（消息持久化 + 自动压缩 + 模型/thinking 恢复）

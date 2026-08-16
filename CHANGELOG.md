@@ -2,6 +2,18 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式（无版本号，按日期记录）。
 
+## 2026-08-17（一）依赖瘦身：nlohmann/json vendored + 移除 valijson
+
+### 变更
+
+- **nlohmann/json 改为 vendored 单头文件**：不再整仓库 FetchContent，直接 vendor 官方 `single_include/nlohmann/json.hpp`（v3.11.3）到 `third_party/nlohmann_json/`，省一次 configure 联网 clone（与 stb 同思路，见该目录 README）。
+- **移除 valijson 依赖**：工具参数 JSON Schema 校验仅用到 type/properties/required 等基础关键字，用项目内置轻量校验器（`src/agent/json_schema.cpp`，约百行）替代，彻底去掉一个完整 JSON Schema 实现（46 个头文件、约 1.8 万行）的引入。
+- **openai-cpp 统一 nlohmann/json 版本**：openai-cpp 自带 v3.9.1（无版本 inline namespace），与项目 v3.11.3 是字面不同类型且经公共头内嵌成员跨库边界传递，构成 ODR 隐患；通过 `target_include_directories(openai-cpp BEFORE PRIVATE ...)` 让 openai-cpp 也编译到 v3.11.3，消除隐患。
+
+### 测试
+
+- 全套用例通过（136 通过 + 1 跳过联网用例）。
+
 ## 2026-08-14（五）web_fetch 联网工具
 
 ### 新增

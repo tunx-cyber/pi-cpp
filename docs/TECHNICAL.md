@@ -153,7 +153,7 @@ outer loop: getFollowUpMessages → 非空则继续内层；否则 agent_end
 
 ### 3.3 工具批次
 
-**preflight（串行）**：按名查工具 → `prepareArguments` shim → valijson schema 校验 → `beforeToolCall` 钩子 → abort 检查。任一失败返回 immediate error toolResult（工具未执行）。
+**preflight（串行）**：按名查工具 → `prepareArguments` shim → 内置 JSON Schema 校验（`json_schema.cpp`，仅 type/properties/required/items/enum）→ `beforeToolCall` 钩子 → abort 检查。任一失败返回 immediate error toolResult（工具未执行）。
 
 **execute（并行，默认）**：
 
@@ -374,7 +374,6 @@ cmake --build build
 cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
   -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=build/_deps/nlohmann_json-src \
   -DFETCHCONTENT_SOURCE_DIR_OPENAI-CPP=build/_deps/openai-cpp-src \
-  -DFETCHCONTENT_SOURCE_DIR_VALIJSON=build/_deps/valijson-src \
   -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=build/_deps/googletest-src
 cmake --build build-tsan && ./build-tsan/pi_tests
 ```
@@ -401,7 +400,7 @@ cmake --build build-tsan && ./build-tsan/pi_tests
 |---|---|
 | 内置模型 | `src/ai/model_registry.cpp` 的 `build_builtin_models()`；运行时 override 用 `register_model` |
 | provider 兼容分支 | `src/ai/openai_transport.cpp` 的 `detect_compat`（镜像 pi detectCompat，同步 §2.5/§7 wire 表格） |
-| 编码工具 | `src/app/commands.cpp` 的 `make_coding_tools`（schema 由 valijson 自动校验；`executionMode=Sequential` 可强制串行）。web_fetch 走 libcurl，详见 §12.1 第 7 条契约 |
+| 编码工具 | `src/app/commands.cpp` 的 `make_coding_tools`（schema 由内置 JSON Schema 校验器自动校验；`executionMode=Sequential` 可强制串行）。web_fetch 走 libcurl，详见 §12.1 第 7 条契约 |
 | slash 命令 | `src/app/repl.cpp` 的 `handle_command`（按现有 if 链追加）；用户模板放 `~/.pi-cpp/templates/<name>.md` |
 | 会话 JSONL 格式 | `src/harness/session.cpp`（version-3 头部；格式变更必须兼容旧文件，`session_entry_from_json` 负责解析） |
 
