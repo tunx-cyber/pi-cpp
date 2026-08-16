@@ -57,11 +57,11 @@ TEST(CostTest, DeepseekFlashPricesInCny)
     usage.cacheWrite = 0;
     usage.totalTokens = 3500;
     const Cost cost = calculate_cost(*model, usage);
-    // 1.008/1e6*1000 + 2.016/1e6*2000 + 0.02016/1e6*500
-    EXPECT_DOUBLE_EQ(cost.input, 0.001008);
-    EXPECT_DOUBLE_EQ(cost.output, 0.004032);
-    EXPECT_DOUBLE_EQ(cost.cacheRead, 0.00001008);
-    EXPECT_DOUBLE_EQ(cost.total, 0.00505008);
+    // 1.0/1e6*1000 + 2.0/1e6*2000 + 0.02/1e6*500
+    EXPECT_DOUBLE_EQ(cost.input, 0.001);
+    EXPECT_DOUBLE_EQ(cost.output, 0.004);
+    EXPECT_DOUBLE_EQ(cost.cacheRead, 0.00001);
+    EXPECT_DOUBLE_EQ(cost.total, 0.00501);
 }
 
 TEST(CostTest, PricingOverrideApplies)
@@ -74,7 +74,7 @@ TEST(CostTest, PricingOverrideApplies)
     EXPECT_DOUBLE_EQ(model.costInput, 9.9);
     EXPECT_DOUBLE_EQ(model.costOutput, 8.8);
     // 未覆盖的字段保留内置默认价
-    EXPECT_DOUBLE_EQ(model.costCacheRead, 0.02016);
+    EXPECT_DOUBLE_EQ(model.costCacheRead, 0.02);
     EXPECT_DOUBLE_EQ(model.costCacheWrite, 0.0);
 }
 

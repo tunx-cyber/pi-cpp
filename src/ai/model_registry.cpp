@@ -26,9 +26,9 @@ ModelInfo deepseek_v4_flash()
         {ThinkingLevel::Xhigh, "max"},
     };
     m.input = {"text"};
-    m.costInput = 1.008;    // 人民币元/M（原美元 0.14 × 7.2 汇率）
-    m.costOutput = 2.016;
-    m.costCacheRead = 0.02016;
+    m.costInput = 1.0;
+    m.costOutput = 2.0;
+    m.costCacheRead = 0.02;
     m.costCacheWrite = 0;
     m.contextWindow = 1000000;
     m.maxTokens = 384000;
