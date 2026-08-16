@@ -73,6 +73,15 @@ if(TARGET openai-cpp AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(openai-cpp PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/openai_cpp_compat.h)
 endif()
 
+# openai-cpp 自带 external/nlohmann/json.hpp（v3.9.1，无版本 inline namespace），
+# 而本项目用 vendored v3.11.3（nlohmann::json_v3_11_3）。两者是字面不同的类型，
+# 公共头文件内嵌 nlohmann::json 成员又跨库边界传递，构成 ODR 隐患。
+# 用 BEFORE 让 openai-cpp 编译时优先解析到本项目 vendored 的 v3.11.3，
+# 使库与调用方同版本（见 third_party/nlohmann_json/README.md）。
+if(TARGET openai-cpp)
+  target_include_directories(openai-cpp BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json)
+endif()
+
 # ============ pi_core：ai + agent + harness 静态库 ============
 set(PI_CORE_SOURCES
   src/ai/sse_parser.cpp
