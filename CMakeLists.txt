@@ -17,14 +17,8 @@ include(FetchContent)
 # 每个构建目录使用独立依赖树，避免 Make/Ninja 或不同平台共享 CMake 产物。
 set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_deps")
 
-# 声明 nlohmann/json（使用指定 tag + 浅克隆）
-FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG        v3.11.3
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
-)
+# nlohmann/json 是 header-only 库，官方提供单头文件 single_include/nlohmann/json.hpp，
+# 直接 vendor 在 third_party/nlohmann_json/（见其 README），不再整仓库 FetchContent。
 
 # 声明 openai-cpp（HTTP/SSE 传输实现，同样使用浅克隆）
 FetchContent_Declare(
@@ -63,7 +57,6 @@ FetchContent_Declare(
 find_package(CURL REQUIRED)
 
 # 下载并配置所有依赖（注意顺序：先 MakeAvailable 被依赖的库）
-FetchContent_MakeAvailable(nlohmann_json)
 FetchContent_MakeAvailable(openai-cpp)
 FetchContent_MakeAvailable(valijson)
 FetchContent_MakeAvailable(googletest)
@@ -104,13 +97,14 @@ set(PI_CORE_SOURCES
 add_library(pi_core STATIC ${PI_CORE_SOURCES})
 target_include_directories(pi_core PUBLIC include)
 target_link_libraries(pi_core PUBLIC
-  nlohmann_json::nlohmann_json
   openai::openai
   CURL::libcurl
 )
 target_include_directories(pi_core PUBLIC ${valijson_SOURCE_DIR}/include)
 # vendored stb（见 third_party/stb/README.md）
 target_include_directories(pi_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+# vendored nlohmann/json（见 third_party/nlohmann_json/README.md）
+target_include_directories(pi_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json)
 
 # ============ picpp：终端可执行 ============
 add_executable(picpp
