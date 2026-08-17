@@ -4,6 +4,7 @@ project(pi_cpp)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(BUILD_TESTING "Build google test" ON)
 # 只有 macOS 的剪贴板实现需要 Objective-C++；Linux 构建不应强制依赖该编译器。
 if(APPLE)
   enable_language(OBJCXX)
@@ -34,6 +35,7 @@ FetchContent_Declare(
 
 # stb 是纯 header 库且上游无 CMake 构建文件，直接 vendor 在 third_party/stb/（见其 README）
 
+if(BUILD_TESTING)
 # 声明 googletest（单元测试框架）
 FetchContent_Declare(
   googletest
@@ -42,14 +44,15 @@ FetchContent_Declare(
   GIT_SHALLOW    TRUE
   GIT_PROGRESS   TRUE
 )
-
+endif()
 # 查找系统 libcurl（openai-cpp 依赖）
 find_package(CURL REQUIRED)
 
 # 下载并配置所有依赖（注意顺序：先 MakeAvailable 被依赖的库）
 FetchContent_MakeAvailable(openai-cpp)
+if(BUILD_TESTING)
 FetchContent_MakeAvailable(googletest)
-
+endif()
 
 # openai-cpp 1.0.0 的若干头文件缺失显式 include：webhooks.hpp 用 std::variant，
 # utils/to_file.hpp、audio.hpp、videos.hpp 用 std::uint8_t（缺 <cstdint>）。
@@ -115,6 +118,7 @@ add_executable(picpp
 )
 target_link_libraries(picpp PRIVATE pi_core)
 
+if(BUILD_TESTING)
 # ============ pi_tests：单元测试 ============
 set(PI_TEST_SOURCES
   tests/main.cpp
@@ -145,3 +149,4 @@ target_link_libraries(pi_tests PRIVATE pi_core gtest_main)
 
 enable_testing()
 add_test(NAME pi_tests COMMAND pi_tests)
+endif()
