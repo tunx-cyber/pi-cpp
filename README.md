@@ -12,7 +12,7 @@ pi（TypeScript 终端 Agent）的 C++ 移植版。最核心的 agent 功能：�
 
 ## 构建
 
-依赖：CMake ≥ 3.16、Ninja、clang、libcurl。第三方库（openai-cpp、googletest）由 FetchContent 自动下载；nlohmann-json、stb 已 vendor 在 `third_party/`（纯 header，无需下载）；工具参数 JSON Schema 校验为项目内置轻量实现（不依赖 valijson）。
+依赖：CMake ≥ 3.16、Ninja、clang、libcurl。googletest 由 FetchContent 自动下载；nlohmann-json、stb 已 vendor 在 `third_party/`（纯 header，无需下载）；工具参数 JSON Schema 校验为项目内置轻量实现（不依赖 valijson）。
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -57,7 +57,7 @@ REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /im
 ```
 include/pi/
 ├── ai/       Json 别名 + TransportAdapter 接口（唯一知道 HTTP/SSE 的层）
-│             openai_transport：openai-cpp 实现（流式 SSE/usage/thinking/工具调用/abort）
+│             openai_transport：内置轻量 openai 客户端实现（流式 SSE/usage/thinking/工具调用/abort）
 │             model_registry：deepseek-v4-flash / deepseek-v4-pro + 运行时 override
 │             cost：价格/1e6 × token（纯函数）；sse_parser：独立 SSE 帧解析
 ├── agent/    Agent（prompt/continue/steer/followUp/abort/reset/subscribe/waitForIdle）

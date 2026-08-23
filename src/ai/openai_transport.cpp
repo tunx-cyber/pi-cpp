@@ -8,11 +8,10 @@
 #include <atomic>
 #include <map>
 #include <mutex>
-#include <openai/client.hpp>
-#include <openai/error.hpp>
 #include <optional>
 #include <set>
 
+#include "pi/ai/openai_mini.h"
 #include "pi/ai/cost.h"
 #include "pi/ai/json_util.h"
 
@@ -281,7 +280,7 @@ bool has_tool_history(const std::vector<Message>& messages)
 
 /**
  * 消息 → wire 格式（镜像 pi 的 convertMessages）。
- * 返回 openai-cpp 的 ChatMessage 列表，以及每条 assistant 消息需要注入的额外字段
+ * 返回内置轻量 openai 客户端的 ChatMessage 列表，以及每条 assistant 消息需要注入的额外字段
  * （deepseek 的 reasoning_content），由 body augmenter 写回。
  */
 struct ConvertedMessages
@@ -563,7 +562,8 @@ class OpenAiCompletionsTransport::Impl
         {
             output.stopReason = StopReason::Error;
             output.errorMessage =
-                "Missing API key. Set PI_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY before sending a prompt.";
+                "Missing API key. Set PI_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY before "
+                "sending a prompt.";
             StreamEvent error;
             error.type = StreamEvent::Type::Error;
             error.reason = StopReason::Error;
@@ -657,12 +657,12 @@ class OpenAiCompletionsTransport::Impl
         request_options.max_retries = static_cast<size_t>(opts.maxRetries);
         request_options.timeout = opts.timeoutMs;
         // 不手动注入 Authorization：客户端已用 request_api_key + use_bearer_auth 构造，
-        // openai-cpp 会自行添加 "Bearer <key>"。这里重复注入会依赖服务端对重复头的处理。
+        // 内置客户端会自行添加 "Bearer <key>"。这里重复注入会依赖服务端对重复头的处理。
         for (const auto& [key, value] : opts.headers)
         {
             request_options.headers[key] = value;
         }
-        // 注意：opts.onResponse（响应头回调）当前未实现——openai-cpp 的 HttpClient 接口
+        // 注意：opts.onResponse（响应头回调）当前未实现——内置 HttpClient 接口
         // 不向上传递原始响应头，状态码/错误信息已通过异常与错误事件携带。
         // 若未来需要，需在 AbortableHttpClient 中把 status/headers 回传到 Impl。
         (void)opts.onResponse;
@@ -1107,7 +1107,7 @@ class OpenAiCompletionsTransport::Impl
         return out;
     }
 
-    // ---- body augmenter：注入 openai-cpp 无法表达的开创字段 ----
+    // ---- body augmenter：注入轻量客户端类型无法表达的开创字段 ----
 
     void set_augmenter(const Json& topLevel, Json assistantExtras)
     {

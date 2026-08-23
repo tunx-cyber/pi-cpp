@@ -13,7 +13,7 @@ app(REPL)  →  harness  →  agent  →  ai
 ```
 pi-cpp/
 ├── include/pi/
-│   ├── ai/       类型、事件、模型表、计费、SSE 解析、TransportAdapter 接口、openai-cpp 传输
+│   ├── ai/       类型、事件、模型表、计费、SSE 解析、TransportAdapter 接口、openai 轻量客户端传输
 │   ├── agent/    Agent 状态机、agent 循环、双队列、schema 校验、子 agent 工具
 │   ├── harness/  会话(JSONL)、压缩、skills、模板、env(POSIX)、AgentHarness
 │   └── app/      settings、图片、slash 命令、REPL、AgentSession
@@ -24,7 +24,7 @@ pi-cpp/
 
 核心设计约束：
 
-1. **`TransportAdapter` 是唯一知道 HTTP/SSE 协议的层**。上层全是接口与数据；用户自己的协议库在此对接，内置 openai-cpp 实现为默认适配器。
+1. **`TransportAdapter` 是唯一知道 HTTP/SSE 协议的层**。上层全是接口与数据；用户自己的协议库在此对接，内置轻量 openai 客户端实现为默认适配器。
 2. **事件是普通 struct + `std::function` sink**。`stream_chat` 同步阻塞地驱动事件流，上层通过 sink 消费。
 3. **`stream_chat` 契约**（镜像 pi 的 StreamFunction）：不得抛异常；请求/模型/运行时失败一律以 `kError` 事件终止（`stopReason=error/aborted` + `errorMessage`）；正常终止为 `kDone`（`stopReason=stop/length/toolUse`）。
 4. **阻塞为主，线程只出现在 pi 有并发的地方**：工具执行（每调用一个线程，上限 8）、子 agent（父工具线程内联）、UI 事件泵。
@@ -78,7 +78,7 @@ class TransportAdapter {
 };
 ```
 
-### 2.5 openai-cpp 传输（openai_transport.cpp）——wire 层核心
+### 2.5 openai 轻量客户端传输（openai_transport.cpp）——wire 层核心
 
 请求构造分四步：
 
@@ -94,12 +94,12 @@ class TransportAdapter {
    - 单文本块 → 字符串 content；多块 → 数组（image → `data:mime;base64,...` data URL）；
    - assistant：文本拼接为字符串 content，thinking 走签名注入（见下），toolCalls → `{id, type:"function", function:{name, arguments:dump}}`；既无内容又无调用则跳过；
    - 连续 toolResult 合并为一个 `role:"tool"` 消息组（文本 `\n` 连接，纯图片用 `(see attached image)` 占位）。
-4. **body augmenter**：openai-cpp 的 typed 结构无法表达 deepseek 的 `thinking` 参数与 assistant 消息的 `reasoning_content` 回放，因此在自定义 HttpClient 层解析请求体 JSON 后注入：
+4. **body augmenter**：轻量客户端的 typed 结构无法表达 deepseek 的 `thinking` 参数与 assistant 消息的 `reasoning_content` 回放，因此在自定义 HttpClient 层解析请求体 JSON 后注入：
    - `model.reasoning && thinkingFormat=="deepseek"` → `body["thinking"] = {type: "enabled"/"disabled"}`；
    - 每个 assistant 消息按签名注入 `reasoning_content`（回放 thinking）或空串（deepseek 要求所有回放 assistant 消息携带）；
    - 有 tool_calls 无 content 的 assistant 消息 → `content: null`；
    - **注入序号不变量**：`assistantExtras[i]` 与请求体第 i 条 assistant 消息一一对应（`requiresAssistantAfterToolResult` 插入的桥接消息同样占一个槽位、推空 extras）；augmenter 超范围时跳过注入而非错配；
-   - `Authorization` 头由 openai-cpp 客户端统一注入（`use_bearer_auth`），transport 不手动添加，避免重复头。
+   - `Authorization` 头由轻量客户端统一注入（`use_bearer_auth`），transport 不手动添加，避免重复头。
 
 流式解析（`handle_sse_event`，镜像 openai-completions.ts 的 for-await 循环）：
 
@@ -117,7 +117,7 @@ class TransportAdapter {
 
 - write_callback 检查 abort atomic → 返回 0 → curl 以 `CURLE_WRITE_ERROR` 中止传输；
 - 流式模式（`collect_body=false`）下仍收集 ≥400 状态码的错误响应体，保证 `throw_api_error` 带出服务端 message（如 "bad request"）；
-- 自持 `curl_global_init`（绕过 openai-cpp 默认客户端的 RAII）。
+- 自持 `curl_global_init`（轻量客户端不自行初始化 libcurl）。
 
 ## 3. agent 层
 
@@ -353,7 +353,7 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 
 0. **平台范围**：macOS 与 Linux（POSIX）。Windows 原生不支持——REPL（termios/poll）与 Shell（fork/exec、/bin/sh）依赖 POSIX，Windows 用户请用 WSL；`FileSystem`/`Shell` 已是接口（env.h），未来若需原生 Windows 支持可新增 `WindowsShell`/Console 后端而不动上层。
 1. **单 provider**：仅 OpenAI-completions wire（deepseek 端点），无 OAuth/浏览器代理/多 provider/图片生成。
-2. **传输实现**：openai-cpp 库（而非自写 curl SSE），`thinking`/`reasoning_content` 等 deepseek 专有字段经 body augmenter 注入。
+2. **传输实现**：内置轻量 openai 客户端（`src/ai/openai_mini.*`，自写 curl SSE），`thinking`/`reasoning_content` 等 deepseek 专有字段经 body augmenter 注入。
 3. **AgentHarness 裁剪**：无完整事件 hook 系统（before_agent_start/before_provider_request 等），保留消息持久化 + 自动压缩 + 模型/thinking 恢复。
 4. **REPL 简化**：无补全/历史；流式时普通字符输入不缓冲（只接受 Enter/Esc/Ctrl+C）。
 5. **compaction 简化**：split-turn 的 turn-prefix 摘要复用主摘要生成函数；无 branch summarization 全流程。
@@ -373,7 +373,6 @@ cmake --build build
 # stb 已 vendor 在 third_party/stb/，无需拉取）
 cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
   -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=build/_deps/nlohmann_json-src \
-  -DFETCHCONTENT_SOURCE_DIR_OPENAI-CPP=build/_deps/openai-cpp-src \
   -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=build/_deps/googletest-src
 cmake --build build-tsan && ./build-tsan/pi_tests
 ```

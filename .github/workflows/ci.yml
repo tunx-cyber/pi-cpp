@@ -2,7 +2,7 @@ name: CI
 
 # macOS + Linux 双平台：常规构建/单测 + ThreadSanitizer 全量单测。
 # Windows 原生构建暂不支持（REPL/Shell 依赖 POSIX），Windows 用户请用 WSL。
-# 每次 push/PR 触发；依赖（openai-cpp/googletest 由 FetchContent 自动下载，
+# 每次 push/PR 触发；依赖（googletest 由 FetchContent 自动下载，
 # nlohmann-json/stb 已 vendor 在 third_party/，工具参数校验为内置实现）。
 
 on:

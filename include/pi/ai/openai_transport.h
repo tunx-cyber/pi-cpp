@@ -11,7 +11,7 @@ namespace pi
 {
 
 /**
- * OpenAI-completions 传输实现（基于 openai-cpp）。
+ * OpenAI-completions 传输实现（基于内置轻量 openai 客户端）。
  * 负责：Message/Tool → wire JSON 的转换（镜像 pi 的 convertMessages/transformMessages）、
  * 流式 SSE 事件 → StreamEvent 的映射、usage/stopReason 解析、abort 传播。
  */

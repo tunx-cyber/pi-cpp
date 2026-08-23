@@ -35,7 +35,7 @@ struct StreamRequestOptions
 
 /**
  * TransportAdapter 是唯一知道 HTTP/SSE 协议的层。
- * 用户自己的协议库在此对接；默认提供 openai-cpp 实现。
+ * 用户自己的协议库在此对接；默认提供内置轻量 openai 客户端实现。
  *
  * 契约（镜像 pi 的 StreamFunction）：
  * - stream_chat 不得抛异常；请求/模型/运行时失败一律以 kError 事件终止
@@ -70,7 +70,7 @@ class TransportAdapter
     }
 };
 
-/** 默认 OpenAI-completions 传输工厂（openai-cpp 实现）。 */
+/** 默认 OpenAI-completions 传输工厂（内置轻量 openai 客户端实现）。 */
 std::shared_ptr<TransportAdapter> make_openai_completions_transport(
     std::string baseUrl, std::string apiKey,
     std::chrono::milliseconds timeout = std::chrono::milliseconds(600000));

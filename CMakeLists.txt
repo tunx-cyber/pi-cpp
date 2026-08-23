@@ -21,14 +21,9 @@ set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_deps")
 # nlohmann/json 是 header-only 库，官方提供单头文件 single_include/nlohmann/json.hpp，
 # 直接 vendor 在 third_party/nlohmann_json/（见其 README），不再整仓库 FetchContent。
 
-# 声明 openai-cpp（HTTP/SSE 传输实现，同样使用浅克隆）
-FetchContent_Declare(
-  openai-cpp
-  GIT_REPOSITORY https://github.com/ItsJustMeChris/openai-cpp.git
-  GIT_TAG        1.0.0
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE
-)
+# OpenAI-completions 传输层已内置为轻量实现（src/ai/openai_mini.*），
+# 仅保留本项目用到的多模态消息、SSE 流式、usage、生成参数与工具定义，
+# 不再 FetchContent 下载 openai-cpp。
 
 # 工具参数 JSON Schema 校验已内置为轻量实现（src/agent/json_schema.cpp），
 # 不再依赖 valijson——项目只用到 type/properties/required 等基础关键字。
@@ -45,33 +40,12 @@ FetchContent_Declare(
   GIT_PROGRESS   TRUE
 )
 endif()
-# 查找系统 libcurl（openai-cpp 依赖）
+# 查找系统 libcurl（内置 OpenAI 客户端的 HTTP 传输依赖）
 find_package(CURL REQUIRED)
 
-# 下载并配置所有依赖（注意顺序：先 MakeAvailable 被依赖的库）
-FetchContent_MakeAvailable(openai-cpp)
+# 下载并配置测试依赖
 if(BUILD_TESTING)
 FetchContent_MakeAvailable(googletest)
-endif()
-
-# openai-cpp 1.0.0 的若干头文件缺失显式 include：webhooks.hpp 用 std::variant，
-# utils/to_file.hpp、audio.hpp、videos.hpp 用 std::uint8_t（缺 <cstdint>）。
-# libc++ 常通过传递包含掩盖该问题，GCC/libstdc++（Ubuntu CI）会直接报错。
-# 对第三方 target 强制包含统一兼容头（见 cmake/openai_cpp_compat.h），
-# 避免修改 FetchContent 生成的 external/ 源码。
-# 注意：必须保持单个 -include 标志——CMake 对带值选项会做去重合并，
-# 写两个 -include 会被拼成一个，第二个值被当作源文件导致编译失败。
-if(TARGET openai-cpp AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(openai-cpp PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/cmake/openai_cpp_compat.h)
-endif()
-
-# openai-cpp 自带 external/nlohmann/json.hpp（v3.9.1，无版本 inline namespace），
-# 而本项目用 vendored v3.11.3（nlohmann::json_v3_11_3）。两者是字面不同的类型，
-# 公共头文件内嵌 nlohmann::json 成员又跨库边界传递，构成 ODR 隐患。
-# 用 BEFORE 让 openai-cpp 编译时优先解析到本项目 vendored 的 v3.11.3，
-# 使库与调用方同版本（见 third_party/nlohmann_json/README.md）。
-if(TARGET openai-cpp)
-  target_include_directories(openai-cpp BEFORE PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json)
 endif()
 
 # ============ pi_core：ai + agent + harness 静态库 ============
@@ -79,6 +53,7 @@ set(PI_CORE_SOURCES
   src/ai/sse_parser.cpp
   src/ai/json_util.cpp
   src/ai/model_registry.cpp
+  src/ai/openai_mini.cpp
   src/ai/openai_transport.cpp
   src/agent/agent_loop.cpp
   src/agent/agent.cpp
@@ -98,7 +73,6 @@ set(PI_CORE_SOURCES
 add_library(pi_core STATIC ${PI_CORE_SOURCES})
 target_include_directories(pi_core PUBLIC include)
 target_link_libraries(pi_core PUBLIC
-  openai::openai
   CURL::libcurl
 )
 # vendored stb（见 third_party/stb/README.md）
