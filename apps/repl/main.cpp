@@ -14,7 +14,7 @@
 #include "pi/app/repl.h"
 #include "pi/app/settings.h"
 
-int main(int argc, char** argv)
+int run_app(int argc, char** argv)
 {
     std::string cwd;
     char buf[4096];
@@ -155,4 +155,18 @@ int main(int argc, char** argv)
     }
     pi::Repl repl(session, cwd);
     return repl.run();
+}
+
+int main(int argc, char** argv)
+{
+    try
+    {
+        return run_app(argc, argv);
+    }
+    catch (const std::exception& error)
+    {
+        pi::PosixShell::kill_all_children();
+        std::cerr << "[error] " << error.what() << std::endl;
+        return 1;
+    }
 }

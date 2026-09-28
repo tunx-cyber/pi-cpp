@@ -116,14 +116,10 @@ struct BeforeToolCallResult
 /** afterToolCall 返回的字段级覆盖。 */
 struct AfterToolCallResult
 {
-    bool hasContent = false;
-    std::vector<ContentBlock> content;
-    bool hasDetails = false;
-    Json details;
-    bool hasIsError = false;
-    bool isError = false;
-    bool hasTerminate = false;
-    bool terminate = false;
+    std::optional<std::vector<ContentBlock>> content;
+    std::optional<Json> details;
+    std::optional<bool> isError;
+    std::optional<bool> terminate;
 };
 
 struct AgentContext
@@ -138,7 +134,7 @@ struct BeforeToolCallContext
     const AgentMessage* assistantMessage;
     const ContentBlock* toolCall;
     Json args;
-    AgentContext* context;
+    const AgentContext* context;
 };
 
 struct AfterToolCallContext
@@ -148,14 +144,14 @@ struct AfterToolCallContext
     Json args;
     ToolResult result;
     bool isError = false;
-    AgentContext* context;
+    const AgentContext* context;
 };
 
 struct ShouldStopAfterTurnContext
 {
     const AgentMessage* message;
     const std::vector<Message>* toolResults;
-    AgentContext* context;
+    const AgentContext* context;
     const std::vector<AgentMessage>* newMessages;
 };
 

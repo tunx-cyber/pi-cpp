@@ -1,16 +1,16 @@
 #include "pi/app/settings.h"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
-
-#include <cerrno>
-#include <cstdio>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace pi
 {
@@ -47,12 +47,6 @@ std::optional<ThinkingLevel> thinking_from_json(const Json& json)
 {
     if (!json.is_string()) return std::nullopt;
     return thinking_level_from_string(json.get<std::string>());
-}
-
-std::string env_or(const char* name, const std::string& fallback)
-{
-    const char* value = std::getenv(name);
-    return value && *value ? std::string(value) : fallback;
 }
 
 /** 解析 .env 文件（KEY=VALUE 行，支持 # 注释与引号）。 */
@@ -250,8 +244,7 @@ Settings Settings::load()
         }
         const auto read_price = [&](const char* key) -> std::optional<double>
         {
-            if (json->contains(key) && (*json)[key].is_number())
-                return (*json)[key].get<double>();
+            if (json->contains(key) && (*json)[key].is_number()) return (*json)[key].get<double>();
             return std::nullopt;
         };
         settings.pricing.input = read_price("costInput");

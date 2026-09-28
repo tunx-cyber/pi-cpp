@@ -26,7 +26,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ninja-build libcurl4-openssl-dev
 
       - name: 配置
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPI_WARNINGS_AS_ERRORS=ON
 
       - name: 构建
         run: cmake --build build
@@ -49,10 +49,56 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ninja-build libcurl4-openssl-dev
 
       - name: 配置（tsan）
-        run: cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread"
+        run: cmake -S . -B build-tsan -G Ninja -DPI_SANITIZER=thread -DCMAKE_BUILD_TYPE=Debug -DPI_WARNINGS_AS_ERRORS=ON
 
       - name: 构建（tsan）
         run: cmake --build build-tsan
 
       - name: 单测（tsan）
-        run: ./build-tsan/pi_tests
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            setarch "$(uname -m)" -R ./build-tsan/pi_tests
+          else
+            ./build-tsan/pi_tests
+          fi
+
+  asan-ubsan:
+    name: AddressSanitizer + UBSan (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libcurl4-openssl-dev
+      - name: Configure
+        run: cmake -S . -B build-asan -G Ninja -DPI_SANITIZER=address -DCMAKE_BUILD_TYPE=Debug -DPI_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build-asan --parallel 2
+      - name: Test
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-asan --output-on-failure
+
+  format:
+    name: C++ formatting (changed files)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install clang-format==18.1.8
+      - name: Check formatting
+        env:
+          FORMAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if ! git cat-file -e "$FORMAT_BASE^{commit}" 2>/dev/null; then
+            FORMAT_BASE=$(git rev-parse HEAD^)
+          fi
+          python scripts/check_format.py --base "$FORMAT_BASE" --head HEAD

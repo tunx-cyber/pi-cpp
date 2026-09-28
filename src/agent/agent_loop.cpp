@@ -1,14 +1,15 @@
 #include "pi/agent/agent_loop.h"
 
-#include <condition_variable>
+#include <cctype>
 
 #include <algorithm>
-#include <cctype>
+#include <exception>
 #include <mutex>
 #include <thread>
 
 #include "pi/agent/json_schema.h"
 #include "pi/ai/json_util.h"
+#include "pi/util/scope_exit.h"
 
 namespace pi
 {
@@ -138,7 +139,7 @@ PreparationResult prepare_tool_call(const AgentContext& context,
             hook_context.assistantMessage = &assistant_message;
             hook_context.toolCall = &tool_call;
             hook_context.args = prepared.args;
-            hook_context.context = const_cast<AgentContext*>(&context);
+            hook_context.context = &context;
             const auto before_result = config.beforeToolCall(hook_context, signal);
             if (signal && signal->load())
             {
@@ -182,12 +183,12 @@ FinalizedToolCallOutcome finalize_executed_tool_call(
         hook_context.args = prepared.args;
         hook_context.result = outcome.result;
         hook_context.isError = outcome.isError;
-        hook_context.context = const_cast<AgentContext*>(&context);
+        hook_context.context = &context;
         const auto after = config.afterToolCall(hook_context, signal);
-        if (after.hasContent) outcome.result.content = after.content;
-        if (after.hasDetails) outcome.result.details = after.details;
-        if (after.hasIsError) outcome.isError = after.isError;
-        if (after.hasTerminate) outcome.result.terminate = after.terminate;
+        if (after.content) outcome.result.content = *after.content;
+        if (after.details) outcome.result.details = *after.details;
+        if (after.isError) outcome.isError = *after.isError;
+        if (after.terminate) outcome.result.terminate = *after.terminate;
     }
     catch (const std::exception& e)
     {
@@ -338,70 +339,102 @@ ExecutedToolBatch execute_tool_calls_parallel(AgentContext& context,
         if (signal && signal->load()) break;
     }
 
-    // 并发执行：每调用一个线程，上限 8 并发；完成序记录在 completion_order。
-    // 并行工具的流式更新由工具线程收集（completion_mutex 保护），R1 在完成序阶段统一发出。
+    // Workers execute tools only. Hooks and event dispatch stay on the run thread.
     std::vector<FinalizedToolCallOutcome> results(entries.size());
     std::vector<std::vector<ToolResult>> updates(entries.size());
     std::vector<size_t> completion_order;
+    completion_order.reserve(entries.size());
     std::mutex completion_mutex;
-    std::condition_variable completion_cv;
-    std::atomic<int> active{0};
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::exception_ptr worker_error;
 
-    std::vector<std::thread> threads;
-    for (size_t i = 0; i < entries.size(); ++i)
+    auto worker = [&]
     {
-        if (entries[i].immediate)
+        try
         {
-            results[i] = entries[i].outcome;
+            while (!failed.load())
             {
+                const size_t i = next.fetch_add(1);
+                if (i >= entries.size()) return;
+                auto& executed = results[i];
+                if (entries[i].immediate)
+                {
+                    executed = entries[i].outcome;
+                }
+                else
+                {
+                    executed.toolCall = entries[i].prepared.toolCall;
+                    try
+                    {
+                        if (signal && signal->load())
+                        {
+                            executed.result = create_error_tool_result("Operation aborted");
+                            executed.isError = true;
+                        }
+                        else
+                        {
+                            executed.result = entries[i].prepared.tool->execute(
+                                executed.toolCall->id, entries[i].prepared.args, signal,
+                                [&, i](const ToolResult& partial)
+                                {
+                                    std::lock_guard<std::mutex> lock(completion_mutex);
+                                    updates[i].push_back(partial);
+                                });
+                        }
+                    }
+                    catch (const std::exception& error)
+                    {
+                        executed.result = create_error_tool_result(error.what());
+                        executed.isError = true;
+                    }
+                    catch (...)
+                    {
+                        executed.result = create_error_tool_result("Unknown tool exception");
+                        executed.isError = true;
+                    }
+                }
                 std::lock_guard<std::mutex> lock(completion_mutex);
                 completion_order.push_back(i);
             }
-            continue;
         }
-        threads.emplace_back(
-            [&, i]
+        catch (...)
+        {
+            std::lock_guard<std::mutex> lock(completion_mutex);
+            if (!worker_error) worker_error = std::current_exception();
+            failed.store(true);
+        }
+    };
+
+    std::vector<std::thread> workers;
+    const size_t worker_count = std::min(entries.size(), static_cast<size_t>(kMaxConcurrentTools));
+    workers.reserve(worker_count);
+    {
+        ScopeExit join_workers(
+            [&]() noexcept
             {
-                {
-                    std::unique_lock<std::mutex> lock(completion_mutex);
-                    completion_cv.wait(lock, [&] { return active.load() < kMaxConcurrentTools; });
-                    active.fetch_add(1);
-                }
-                FinalizedToolCallOutcome executed;
-                executed.toolCall = entries[i].prepared.toolCall;
-                try
-                {
-                    const ToolResult result = entries[i].prepared.tool->execute(
-                        entries[i].prepared.toolCall->id, entries[i].prepared.args, signal,
-                        [&updates, i, &completion_mutex](const ToolResult& partial)
-                        {
-                            std::lock_guard<std::mutex> lock(completion_mutex);
-                            updates[i].push_back(partial);
-                        });
-                    executed.result = result;
-                    executed.isError = false;
-                }
-                catch (const std::exception& e)
-                {
-                    executed.result = create_error_tool_result(e.what());
-                    executed.isError = true;
-                }
-                auto finalized = finalize_executed_tool_call(
-                    context, assistant_message, entries[i].prepared, executed, config, signal);
-                {
-                    std::lock_guard<std::mutex> lock(completion_mutex);
-                    results[i] = std::move(finalized);
-                    completion_order.push_back(i);
-                    active.fetch_sub(1);
-                    completion_cv.notify_one();
-                }
+                for (auto& worker_thread : workers)
+                    if (worker_thread.joinable()) worker_thread.join();
             });
+        try
+        {
+            for (size_t i = 0; i < worker_count; ++i) workers.emplace_back(worker);
+        }
+        catch (...)
+        {
+            failed.store(true);
+            throw;
+        }
     }
-    for (auto& thread : threads) thread.join();
+    if (worker_error) std::rethrow_exception(worker_error);
 
     // R1 按完成序先发收集到的流式更新，再发 tool_execution_end
     for (size_t index : completion_order)
     {
+        if (!entries[index].immediate)
+            results[index] =
+                finalize_executed_tool_call(context, assistant_message, entries[index].prepared,
+                                            results[index], config, signal);
         for (const auto& partial : updates[index])
         {
             AgentEvent update;

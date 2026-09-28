@@ -4,6 +4,8 @@
 #include <fstream>
 #include <vector>
 
+#include "pi/util/scope_exit.h"
+
 // stb 上游在 stb_image_write.h 里使用 sprintf，macOS SDK 将其标记为弃用；
 // 该用法在上游是安全的（缓冲区长度已校验），屏蔽已知的第三方告警以保持构建输出干净
 #ifdef __clang__
@@ -71,6 +73,7 @@ std::optional<ContentBlock> load_image_as_block(const std::string& filePath)
     unsigned char* decoded = stbi_load_from_memory(raw.data(), static_cast<int>(raw.size()), &width,
                                                    &height, &channels, 4 /* force RGBA */);
     if (!decoded) return std::nullopt;
+    ScopeExit release_decoded([&]() noexcept { stbi_image_free(decoded); });
 
     std::vector<unsigned char> output;
     const unsigned char* pixels = decoded;
@@ -84,22 +87,22 @@ std::optional<ContentBlock> load_image_as_block(const std::string& filePath)
         out_width = std::max(1, static_cast<int>(width * scale));
         out_height = std::max(1, static_cast<int>(height * scale));
         output.resize(static_cast<size_t>(out_width) * out_height * 4);
-        stbir_resize_uint8_linear(decoded, width, height, width * 4, output.data(), out_width,
-                                  out_height, out_width * 4, STBIR_RGBA);
+        if (!stbir_resize_uint8_linear(decoded, width, height, width * 4, output.data(), out_width,
+                                       out_height, out_width * 4, STBIR_RGBA))
+            return std::nullopt;
         pixels = output.data();
     }
     int png_size = 0;
     unsigned char* png =
         stbi_write_png_to_mem(pixels, out_width * 4, out_width, out_height, 4, &png_size);
-    stbi_image_free(decoded);
     if (!png) return std::nullopt;
+    ScopeExit release_png([&]() noexcept { STBIW_FREE(png); });
 
     ContentBlock block;
     block.type = BlockType::Image;
     block.data = base64_encode(png, static_cast<size_t>(png_size));
     // The bytes above are always re-encoded as PNG.
     block.mimeType = "image/png";
-    STBIW_FREE(png);
     return block;
 }
 

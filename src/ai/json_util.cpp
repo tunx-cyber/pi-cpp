@@ -89,9 +89,8 @@ std::string longest_valid_json_prefix(const std::string& text)
             if (depth > 0) --depth;
             if (depth == 0) candidates.push_back(i);  // 顶层结构结束
         }
-        else if (depth == 0 &&
-                 (std::isdigit(static_cast<unsigned char>(c)) ||
-                  std::isalpha(static_cast<unsigned char>(c))))
+        else if (depth == 0 && (std::isdigit(static_cast<unsigned char>(c)) ||
+                                std::isalpha(static_cast<unsigned char>(c))))
         {
             candidates.push_back(i);  // 数字 / true / false / null 的可能末尾
         }
@@ -100,14 +99,7 @@ std::string longest_valid_json_prefix(const std::string& text)
     for (auto it = candidates.rbegin(); it != candidates.rend(); ++it)
     {
         const std::string candidate = text.substr(0, *it + 1);
-        try
-        {
-            (void)Json::parse(candidate);
-            return candidate;
-        }
-        catch (...)
-        {
-        }
+        if (Json::accept(candidate)) return candidate;
     }
     return "";
 }

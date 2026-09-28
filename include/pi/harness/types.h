@@ -17,7 +17,7 @@ namespace pi
 // ---------- Result 工具 ----------
 
 template <typename TValue, typename TError>
-struct Result
+struct [[nodiscard]] Result
 {
     bool ok = false;
     TValue value{};
@@ -40,7 +40,7 @@ struct Result
 };
 
 template <typename TError>
-struct Result<void, TError>
+struct [[nodiscard]] Result<void, TError>
 {
     bool ok = false;
     TError error{};

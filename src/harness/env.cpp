@@ -1,26 +1,15 @@
 #include "pi/harness/env.h"
 
 #include <dirent.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
-#include <chrono>
 #include <cstring>
 
 #include <fstream>
 #include <sstream>
-
-// macOS 上 environ 经 _NSGetEnviron() 访问；Linux 由 <unistd.h> 提供
-#if defined(__APPLE__)
-#include <crt_externs.h>
-#define environ (*_NSGetEnviron())
-#endif
 
 namespace pi
 {
@@ -41,12 +30,6 @@ bool is_dir(const std::string& path)
 {
     struct stat st;
     return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-bool is_symlink(const std::string& path)
-{
-    struct stat st;
-    return lstat(path.c_str(), &st) == 0 && S_ISLNK(st.st_mode);
 }
 
 std::string errno_message() { return std::strerror(errno); }
@@ -339,203 +322,6 @@ Result<void, FileError> PosixFileSystem::remove(const std::string& path, bool re
             make_file_error(FileErrorCode::Unknown, errno_message(), resolved));
     }
     return Result<void, FileError>::ok_value();
-}
-
-// ---------- Shell ----------
-
-std::mutex PosixShell::children_mutex_;
-std::set<pid_t> PosixShell::children_;
-
-void PosixShell::register_child(pid_t pid)
-{
-    std::lock_guard<std::mutex> lock(children_mutex_);
-    children_.insert(pid);
-}
-
-void PosixShell::unregister_child(pid_t pid)
-{
-    std::lock_guard<std::mutex> lock(children_mutex_);
-    children_.erase(pid);
-}
-
-void PosixShell::kill_all_children()
-{
-    // 先在锁内快照并清空，再在锁外 kill + sleep：
-    // 避免在持锁状态下 usleep，阻塞其他线程 register/unregister_child。
-    std::vector<pid_t> children;
-    {
-        std::lock_guard<std::mutex> lock(children_mutex_);
-        children.assign(children_.begin(), children_.end());
-        children_.clear();
-    }
-    // 先发 SIGTERM 给整个进程组（干净退出），再 SIGKILL 兜底
-    for (pid_t pid : children)
-    {
-        kill(-pid, SIGTERM);
-    }
-    usleep(100000);  // 100ms 优雅退出窗口
-    for (pid_t pid : children)
-    {
-        kill(-pid, SIGKILL);
-    }
-}
-
-Result<ExecResult, ExecutionError> PosixShell::exec(const std::string& command,
-                                                    const ExecOptions& options)
-{
-    ExecutionError exec_error;
-    exec_error.code = ExecutionErrorCode::SpawnError;
-    exec_error.message = "fork failed";
-
-    // options.env 覆盖：全部在 fork 之前构造好 envp（fork 后到 exec 之间
-    // 只允许 async-signal-safe 调用，不能在子进程里 setenv/malloc）。
-    std::vector<std::string> env_storage;
-    std::vector<char*> envp;
-    if (!options.env.empty())
-    {
-        for (char** e = environ; *e; ++e) env_storage.push_back(*e);
-        for (const auto& [key, value] : options.env)
-        {
-            const std::string assignment = key + "=" + value;
-            bool replaced = false;
-            for (auto& existing : env_storage)
-            {
-                if (existing.compare(0, key.size() + 1, key + "=") == 0)
-                {
-                    existing = assignment;
-                    replaced = true;
-                    break;
-                }
-            }
-            if (!replaced) env_storage.push_back(assignment);
-        }
-        for (auto& entry : env_storage) envp.push_back(entry.data());
-        envp.push_back(nullptr);
-    }
-
-    int stdout_pipe[2];
-    int stderr_pipe[2];
-    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0)
-    {
-        return Result<ExecResult, ExecutionError>::err_value(exec_error);
-    }
-
-    const pid_t pid = fork();
-    if (pid < 0)
-    {
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[0]);
-        close(stderr_pipe[1]);
-        return Result<ExecResult, ExecutionError>::err_value(exec_error);
-    }
-
-    if (pid == 0)
-    {
-        // 子进程：独立进程组，父进程退出/kill 时整组终止
-        setpgid(0, 0);
-        dup2(stdout_pipe[1], STDOUT_FILENO);
-        dup2(stderr_pipe[1], STDERR_FILENO);
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[0]);
-        close(stderr_pipe[1]);
-        if (!options.cwd.empty()) chdir(options.cwd.c_str());
-        if (envp.empty())
-        {
-            execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
-        }
-        else
-        {
-            // execle 最后一个参数是环境变量指针数组
-            execle("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr),
-                   envp.data());
-        }
-        _exit(127);
-    }
-
-    // 父进程：注册子进程，非阻塞 + poll 循环读输出（abort/timeout 感知）
-    register_child(pid);
-    close(stdout_pipe[1]);
-    close(stderr_pipe[1]);
-    fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
-    fcntl(stderr_pipe[0], F_SETFL, O_NONBLOCK);
-
-    std::string stdout_data, stderr_data;
-    char buffer[4096];
-    const auto drain =
-        [&](int fd, std::string& out, const std::function<void(const std::string&)>& callback)
-    {
-        ssize_t n;
-        while ((n = read(fd, buffer, sizeof(buffer))) > 0)
-        {
-            out.append(buffer, n);
-            if (callback) callback(std::string(buffer, n));
-        }
-    };
-
-    int status = 0;
-    const auto started = std::chrono::steady_clock::now();
-    bool exited = false;
-    while (!exited)
-    {
-        if (options.abort && options.abort->load())
-        {
-            // 终止整个进程组（含 shell 及其子孙进程）
-            kill(-pid, SIGTERM);
-            usleep(50000);  // 50ms 优雅窗口
-            kill(-pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            unregister_child(pid);
-            ExecutionError aborted_error;
-            aborted_error.code = ExecutionErrorCode::Aborted;
-            aborted_error.message = "Command aborted";
-            return Result<ExecResult, ExecutionError>::err_value(aborted_error);
-        }
-        if (options.timeoutSeconds)
-        {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                     std::chrono::steady_clock::now() - started)
-                                     .count();
-            if (elapsed > *options.timeoutSeconds)
-            {
-                kill(-pid, SIGTERM);
-                usleep(50000);
-                kill(-pid, SIGKILL);
-                waitpid(pid, &status, 0);
-                unregister_child(pid);
-                ExecutionError timeout_error;
-                timeout_error.code = ExecutionErrorCode::Timeout;
-                timeout_error.message = "Command timed out";
-                return Result<ExecResult, ExecutionError>::err_value(timeout_error);
-            }
-        }
-
-        struct pollfd fds[2];
-        fds[0] = {stdout_pipe[0], POLLIN, 0};
-        fds[1] = {stderr_pipe[0], POLLIN, 0};
-        const int ready = poll(fds, 2, 100);
-        if (ready > 0)
-        {
-            drain(stdout_pipe[0], stdout_data, options.onStdout);
-            drain(stderr_pipe[0], stderr_data, options.onStderr);
-        }
-        const pid_t waited = waitpid(pid, &status, WNOHANG);
-        if (waited == pid) exited = true;
-    }
-    drain(stdout_pipe[0], stdout_data, options.onStdout);
-    drain(stderr_pipe[0], stderr_data, options.onStderr);
-    close(stdout_pipe[0]);
-    close(stderr_pipe[0]);
-
-    unregister_child(pid);
-
-    ExecResult result;
-    result.stdout = std::move(stdout_data);
-    result.stderr = std::move(stderr_data);
-    result.exitCode = WIFEXITED(status) ? WEXITSTATUS(status)
-                                        : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1);
-    return Result<ExecResult, ExecutionError>::ok_value(std::move(result));
 }
 
 }  // namespace pi

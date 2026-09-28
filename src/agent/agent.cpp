@@ -1,6 +1,9 @@
 #include "pi/agent/agent.h"
 
+#include <exception>
 #include <stdexcept>
+
+#include "pi/util/scope_exit.h"
 
 namespace pi
 {
@@ -301,6 +304,21 @@ void Agent::run_with_lifecycle(
         }
         busy_ = true;
     }
+    ScopeExit restore_idle(
+        [this]() noexcept
+        {
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                is_streaming_ = false;
+                streaming_message_.reset();
+                pending_tool_calls_.clear();
+            }
+            {
+                std::lock_guard<std::mutex> lock(busy_mutex_);
+                busy_ = false;
+            }
+            idle_cv_.notify_all();
+        });
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         abort_ = std::make_shared<std::atomic<bool>>(false);
@@ -325,18 +343,6 @@ void Agent::run_with_lifecycle(
     {
         handle_run_failure(std::runtime_error("unknown error"), abort_->load(), abort_);
     }
-
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        is_streaming_ = false;
-        streaming_message_.reset();
-        pending_tool_calls_.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lock(busy_mutex_);
-        busy_ = false;
-    }
-    idle_cv_.notify_all();
 }
 
 void Agent::handle_run_failure(const std::exception& error, bool aborted,
@@ -347,6 +353,7 @@ void Agent::handle_run_failure(const std::exception& error, bool aborted,
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         model_snapshot = model_;
+        error_message_ = error.what();
     }
 
     Message failure;
@@ -439,10 +446,20 @@ void Agent::process_events(const AgentEvent& event,
         std::lock_guard<std::mutex> lock(state_mutex_);
         listeners = listeners_;
     }
+    // Notify every subscriber even if one fails. The run boundary reports the first failure.
+    std::exception_ptr listener_error;
     for (const auto& listener : listeners)
     {
-        listener(event, signal);
+        try
+        {
+            listener(event, signal);
+        }
+        catch (...)
+        {
+            if (!listener_error) listener_error = std::current_exception();
+        }
     }
+    if (listener_error) std::rethrow_exception(listener_error);
 }
 
 }  // namespace pi

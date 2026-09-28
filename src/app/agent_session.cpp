@@ -2,6 +2,8 @@
 
 #include <unistd.h>
 
+#include <stdexcept>
+
 #include "pi/agent/subagent_tool.h"
 #include "pi/ai/model_registry.h"
 
@@ -49,8 +51,7 @@ AgentHarnessOptions build_harness_options(const Settings& settings, const std::s
     options.thinkingLevel = settings.thinking;
     options.pricing = settings.pricing;
     options.transport = make_openai_completions_transport(settings.baseUrl, settings.apiKey);
-    options.getApiKey = [&settings](const ModelInfo&) -> std::optional<std::string>
-    {
+    options.getApiKey = [&settings](const ModelInfo&) -> std::optional<std::string> {
         return settings.apiKey.empty() ? std::nullopt : std::optional<std::string>(settings.apiKey);
     };
     options.systemPromptBase = settings.systemPrompt;
@@ -103,7 +104,7 @@ ModelInfo AgentSession::resolve_model() const
 void AgentSession::new_session()
 {
     const auto created = repo_.create(cwd_);
-    if (!created.ok) return;
+    if (!created.ok) throw std::runtime_error("Cannot create session: " + created.error.message);
     harness_.session() = created.value;
     // /new 新建会话文件后必须清空 agent 内存中的 transcript，否则下一轮 prompt
     // 会把旧会话的历史一并发送给 LLM，导致上下文与会话文件（/resume 恢复结果）脱节。
@@ -254,9 +255,9 @@ void AgentSession::set_model(const std::string& modelId)
 {
     const auto model = get_model(modelId);
     if (!model) return;
+    harness_.set_model(*model);
     settings_.model = modelId;
     settings_.set_override(cwd_, modelId, std::nullopt);
-    harness_.set_model(*model);
     // 切换模型后，当前 thinking 级别可能不再被支持：自动回退到最近支持的级别，
     // 保证"模型 ↔ thinking 级别"约束始终成立（/thinking 命令与设置文件同理）。
     const auto current = harness_.thinking_level();
@@ -271,15 +272,12 @@ void AgentSession::set_model(const std::string& modelId)
 
 void AgentSession::set_thinking(ThinkingLevel level)
 {
+    harness_.set_thinking_level(level);
     settings_.thinking = level;
     settings_.set_override(cwd_, std::nullopt, level);
-    harness_.set_thinking_level(level);
 }
 
-bool AgentSession::compact(std::string* errorOut)
-{
-    return harness_.compact(errorOut);
-}
+bool AgentSession::compact(std::string* errorOut) { return harness_.compact(errorOut); }
 
 std::vector<SessionMetadata> AgentSession::list_sessions() const
 {
@@ -288,10 +286,7 @@ std::vector<SessionMetadata> AgentSession::list_sessions() const
     return sessions.value;
 }
 
-std::string AgentSession::current_session_id() const
-{
-    return harness_.session().metadata().id;
-}
+std::string AgentSession::current_session_id() const { return harness_.session().metadata().id; }
 
 std::vector<AgentMessage> AgentSession::messages() const { return harness_.messages(); }
 

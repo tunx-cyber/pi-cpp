@@ -71,15 +71,22 @@ include/pi/
               commands（slash + 编码工具）、repl（raw mode + 事件泵 + 状态栏 + 进程内存监控）
 ```
 
-并发模型：阻塞 + 线程池。agent 循环单线程阻塞执行；工具批次每调用一个线程（上限 8）；子 agent 在父工具线程内联（不跳线程）。事件只在 run 线程派发，经 mutex+pipe 送到 UI 线程。
+并发模型：阻塞 + 线程池。agent 循环单线程阻塞执行；每个工具批次创建最多 8 个工作线程并从队列领取任务；子 agent 在父工具线程内联（不跳线程）。前置/后置钩子和事件只在 run 线程执行，经 mutex+pipe 送到 UI 线程。
 
 ## 测试
 
 ```bash
-./build/pi_tests                # 127 个用例（另有 1 个真实联网用例默认跳过）
-# ThreadSanitizer（单测套件 tsan 0 警告；网络受限时用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps，见 docs/TECHNICAL.md §11）
-cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread"
+./build/pi_tests                # 真实联网用例默认跳过
+# ThreadSanitizer（可复用已下载的 googletest，见 docs/TECHNICAL.md §11）
+cmake -S . -B build-tsan -G Ninja -DPI_SANITIZER=thread
 cmake --build build-tsan && ./build-tsan/pi_tests
+
+# AddressSanitizer + UndefinedBehaviorSanitizer
+cmake -S . -B build-asan -G Ninja -DPI_SANITIZER=address -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+
+# 修改文件的格式检查（clang-format 18）
+python3 scripts/check_format.py
 ```
 
 测试对照 pi 的 vitest 套件：`cost_test`、`sse_parser_test`、`transport_test`（fake SSE server + 录制 fixture）、`agent_loop_test`（脚本化 transport）、`session_test`/`compaction_test`/`skills_test`/`templates_test`、`subagent_tool_test`。
@@ -87,3 +94,10 @@ cmake --build build-tsan && ./build-tsan/pi_tests
 ## 里程碑状态
 
 M1 骨架+transport ✅ · M2 ai 层完整 ✅ · M3 agent 循环+工具 ✅ · M4 harness ✅ · M5 REPL 应用 ✅ · M6 子 agent+打磨 ✅
+
+项目代码默认启用 `-Wall -Wextra -Wpedantic`；CI 使用 `-DPI_WARNINGS_AS_ERRORS=ON`。
+`Result` 标记为 `[[nodiscard]]`，调用方必须检查失败结果。会话存储失败会向运行/UI 边界报告；
+模型、thinking 与工具设置在持久化成功后才更新运行状态。
+
+工具钩子的 `context` 为只读视图；后置钩子的 `content/details/isError/terminate` 使用
+`std::optional` 表达字段覆盖，未设置表示保留原值。需要替换上下文时使用 `prepareNextTurn` 返回值。

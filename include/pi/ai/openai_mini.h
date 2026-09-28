@@ -151,13 +151,12 @@ class ChatCompletionsResource
 class ChatResource
 {
    public:
-    explicit ChatResource(OpenAIClient& client) : client_(client), completions_(client) {}
+    explicit ChatResource(OpenAIClient& client) : completions_(client) {}
 
     ChatCompletionsResource& completions() { return completions_; }
     const ChatCompletionsResource& completions() const { return completions_; }
 
    private:
-    OpenAIClient& client_;
     ChatCompletionsResource completions_;
 };
 

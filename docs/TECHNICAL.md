@@ -27,7 +27,7 @@ pi-cpp/
 1. **`TransportAdapter` 是唯一知道 HTTP/SSE 协议的层**。上层全是接口与数据；用户自己的协议库在此对接，内置轻量 openai 客户端实现为默认适配器。
 2. **事件是普通 struct + `std::function` sink**。`stream_chat` 同步阻塞地驱动事件流，上层通过 sink 消费。
 3. **`stream_chat` 契约**（镜像 pi 的 StreamFunction）：不得抛异常；请求/模型/运行时失败一律以 `kError` 事件终止（`stopReason=error/aborted` + `errorMessage`）；正常终止为 `kDone`（`stopReason=stop/length/toolUse`）。
-4. **阻塞为主，线程只出现在 pi 有并发的地方**：工具执行（每调用一个线程，上限 8）、子 agent（父工具线程内联）、UI 事件泵。
+4. **阻塞为主，线程只出现在 pi 有并发的地方**：工具执行（每批最多 8 个工作线程）、子 agent（父工具线程内联）、UI 事件泵。
 
 ## 2. ai 层
 
@@ -157,8 +157,8 @@ outer loop: getFollowUpMessages → 非空则继续内层；否则 agent_end
 
 **execute（并行，默认）**：
 
-- 每调用一个 `std::thread`，信号量式上限 8（`atomic<int>` + condition_variable）；
-- 工具线程内：execute（抛异常 = `isError` toolResult）→ `afterToolCall` 钩子（字段级覆盖 content/details/isError/terminate）；
+- 每批创建最多 8 个 `std::thread`，通过原子任务索引领取工作；线程创建或执行异常时由作用域守卫回收已经启动的线程；
+- 工具线程仅执行 execute；全部工作线程结束后，run 线程按完成序调用 `afterToolCall`。钩子的 context 为只读；`std::optional` 字段覆盖 content/details/isError/terminate，未设置表示保留原值；
 - 流式 `onUpdate` 由工具线程收集（completion_mutex 保护），**R1 在完成序阶段统一发出** `tool_execution_end`（满足"只有 R1 推送事件"的并发约束）；
 - `tool_execution_end` 按完成序，toolResult 消息按 assistant 源序（镜像 Promise.all 语义）。
 
@@ -296,9 +296,9 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 
 - **事件通道**：mutex+condvar deque + pipe 通知字节；只有 R1 推送事件（工具事件由循环收集后从 R1 发出）。
 - **abort 传播链**：`Agent::abort()` → 共享 `atomic<bool>` → transport write_callback（中止连接）+ 工具 execute（轮询检查；bash 每 100ms poll 检查并 SIGKILL 进程组，read/grep/find 在遍历循环中检查并返回部分结果）+ 子 agent（watcher 桥接）。
-- **死锁规避**：线程按调用分配（无共享有界线程池 → 无池饥饿）；嵌套深度/轮次上限；子 agent 状态隔离（仅共享 abort atomic）。
+- **死锁规避**：每个批次拥有独立工作线程（嵌套批次不等待父批次的线程名额）；嵌套深度/轮次上限；子 agent 状态隔离（仅共享 abort atomic）。
 - **锁与共享状态清单**：`JsonlSessionStorage::mutex_`（会话条目/索引）、`uuidv7` 内部互斥（条目 id 生成）、`AgentHarness/AgentSession::cost_mutex_`（成本累计）、`Agent::state_mutex_`（状态快照）、`PendingMessageQueue` 自带互斥。规则：跨线程共享状态要么加锁，要么只在 run 线程写。
-- **tsan 验证**：全套 118 用例（含多线程会话并发追加回归测试）在 `-fsanitize=thread` 下 0 警告。
+- **tsan 验证**：CI 使用 `PI_SANITIZER=thread` 检查并发访问；包括多线程会话追加、工具批次和子 agent 用例。
 
 ## 7. Wire 协议细节（DeepSeek）
 
@@ -365,21 +365,26 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
-./build/pi_tests                     # 127 用例
+./build/pi_tests                     # 实际用例数由测试输出给出
 ./build/picpp                        # 交互 REPL
 ./build/picpp "prompt"               # 管道一次性对话（自动读 .env）
 
 # ThreadSanitizer（网络受限时可用 FETCHCONTENT_SOURCE_DIR_* 复用 build/_deps 已下载的依赖源；
 # stb 已 vendor 在 third_party/stb/，无需拉取）
-cmake -S . -B build-tsan -G Ninja -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
-  -DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=build/_deps/nlohmann_json-src \
+cmake -S . -B build-tsan -G Ninja -DPI_SANITIZER=thread \
   -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=build/_deps/googletest-src
 cmake --build build-tsan && ./build-tsan/pi_tests
 ```
 
+格式检查：`python3 scripts/check_format.py`，修复：追加 `--fix`。CI 对 PR/push 修改的项目 C++ 文件执行检查，使用 clang-format 18。
+
+Linux 上若 TSan 在启动时报 `unexpected memory mapping`，可用
+`setarch x86_64 -R ./build-tsan/pi_tests` 仅关闭该测试进程的地址随机化；Linux CI 使用相同方式启动，
+不修改系统全局设置。
+
 代码风格：`.clang-format`（Google 基础 + Allman 大括号 + 4 空格缩进 + 100 列 + include regroup），`clang-format -i $(find include src apps tests -name '*.cpp' -o -name '*.hpp' -o -name '*.h')`。
 
-**CI**：`.github/workflows/ci.yml` 在 push/PR 时跑 macOS 14 与 Ubuntu 24.04 双平台矩阵（构建 + 单测 + tsan 单测）。Linux 平台以此为准；本地改动若涉及 env/repl/commands 等平台相关代码，请确认 CI 两个平台都绿再合并。
+**CI**：`.github/workflows/ci.yml` 在 push/PR 时跑 macOS 14 与 Ubuntu 24.04 双平台矩阵（警告视为错误的构建、单测、TSan、ASan/UBSan）及修改文件的 clang-format 18 检查。Linux 平台以此为准；本地改动若涉及 env/repl/commands 等平台相关代码，请确认 CI 两个平台都绿再合并。
 
 ## 12. 维护指南（人工维护必读）
 
@@ -400,13 +405,29 @@ cmake --build build-tsan && ./build-tsan/pi_tests
 | 内置模型 | `src/ai/model_registry.cpp` 的 `build_builtin_models()`；运行时 override 用 `register_model` |
 | provider 兼容分支 | `src/ai/openai_transport.cpp` 的 `detect_compat`（镜像 pi detectCompat，同步 §2.5/§7 wire 表格） |
 | 编码工具 | `src/app/commands.cpp` 的 `make_coding_tools`（schema 由内置 JSON Schema 校验器自动校验；`executionMode=Sequential` 可强制串行）。web_fetch 走 libcurl，详见 §12.1 第 7 条契约 |
-| slash 命令 | `src/app/repl.cpp` 的 `handle_command`（按现有 if 链追加）；用户模板放 `~/.pi-cpp/templates/<name>.md` |
+| slash 命令 | `src/app/repl_commands.cpp` 的 `handle_command`（按现有 if 链追加）；用户模板放 `~/.pi-cpp/templates/<name>.md` |
 | 会话 JSONL 格式 | `src/harness/session.cpp`（version-3 头部；格式变更必须兼容旧文件，`session_entry_from_json` 负责解析） |
 
 ### 12.3 提交前检查清单
 
-1. `cmake --build build && ./build/pi_tests` 全绿（当前 127 用例；另有 1 个真实联网用例默认跳过，`PI_LIVE_NET_TESTS=1` 启用）。
+1. `cmake --build build && ./build/pi_tests` 全绿（真实联网用例默认跳过，`PI_LIVE_NET_TESTS=1` 启用）。
 2. REPL 交互改动（输入解码/渲染/退出路径）必须过 pty 冒烟：菜单唤起、Tab 补全、Shift+Enter/Ctrl+J 多行、空闲 Ctrl+C 干净退出（见 `tests/` 之外的手动清单，pty 脚本驱动）。
 2. 涉及并发/线程改动：跑一遍 tsan（见 §11）。
 3. `clang-format -i` 改动的文件。
 4. 若行为语义有变：更新对应测试、README 与本文档（用例数、wire 表格、已知裁剪清单）。
+
+### 12.4 资源和失败边界
+
+- `src/harness/posix_shell.cpp` 独立负责进程执行；管道由 `UniqueFd` 管理，子进程由作用域守卫终止和回收。fork 后的子进程只调用 async-signal-safe 操作，工作目录/exec 失败经专用管道报告。取消、超时和输出回调异常均释放描述符。
+- `src/ai/curl_http_client.cpp` 管理 HTTP 资源。C 回调捕获异常、返回失败码；`curl_easy_perform` 返回后再在 C++ 层传播。SSE 解析统一使用 `pi::SseParser`。
+- `Agent` 在所有退出路径恢复 idle 并通知等待者。同一事件继续通知其余监听器后再报告首个监听器异常；失败事件的监听器再次抛错时，异常传播给调用者。
+- `AgentHarness` 检查消息和配置的持久化结果。配置写入失败不会改变运行配置；消息写入失败会报告运行错误，不宣称已保存。自动压缩失败同样向调用者报告。
+- REPL 命令错误显示在终端，运行作用域保证恢复终端设置；非交互入口捕获异常并以非零状态退出。
+- REPL 输入解码在 `terminal_input.cpp`，命令菜单与分发在 `repl_commands.cpp`，主循环和显示在 `repl.cpp`。
+
+API 迁移：后置钩子原先的 `hasContent/hasDetails/hasIsError/hasTerminate` 已移除，直接给对应 optional 赋值；显式 `false` 也是有效覆盖。钩子上下文改为 const，替换上下文请通过 `prepareNextTurn` 返回 `AgentLoopTurnUpdate`。
+
+本次本地验证（Linux/GCC）：普通、ASan/UBSan、TSan 构建均启用 `-Werror`；每套 158 项测试中
+157 项通过，1 项真实联网测试按默认设置跳过。TSan 使用上述进程级地址布局设置，无竞争报告。
+PTY 冒烟覆盖菜单、Tab 补全、Shift+Enter、Ctrl+J、Ctrl+C 退出与终端设置恢复。
+macOS 构建与检查由 CI 执行，本地未运行。

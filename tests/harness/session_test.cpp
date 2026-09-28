@@ -59,8 +59,8 @@ TEST_F(SessionTest, RoundTripWriteOpenAndBuildContext)
     const auto assistant_id = session.append_message(assistant);
     ASSERT_TRUE(assistant_id.ok);
 
-    session.append_model_change("deepseek", "deepseek-v4-flash");
-    session.append_thinking_level_change("high");
+    ASSERT_TRUE(session.append_model_change("deepseek", "deepseek-v4-flash").ok);
+    ASSERT_TRUE(session.append_thinking_level_change("high").ok);
 
     // 重新打开
     const auto metadata = session.metadata();
@@ -124,7 +124,7 @@ TEST_F(SessionTest, BranchAndLabelSupport)
 
 TEST_F(SessionTest, InvalidSessionFileRejected)
 {
-    fs_->write_file(root_ + "/bad.jsonl", "not json\n");
+    ASSERT_TRUE(fs_->write_file(root_ + "/bad.jsonl", "not json\n").ok);
     const auto storage = JsonlSessionStorage::open(*fs_, root_ + "/bad.jsonl");
     EXPECT_FALSE(storage.ok);
 }
@@ -251,7 +251,10 @@ TEST_F(SessionTest, ConcurrentAppendsKeepLinearHistory)
     std::string prev_id;
     for (const auto& entry : branch.value)
     {
-        if (!prev_id.empty()) EXPECT_EQ(entry.parentId, prev_id);
+        if (!prev_id.empty())
+        {
+            EXPECT_EQ(entry.parentId, prev_id);
+        }
         prev_id = entry.id;
     }
 }

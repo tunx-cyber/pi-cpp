@@ -30,6 +30,7 @@ std::vector<SseEvent> SseParser::finalize()
         events.push_back(std::move(current_));
         current_ = SseEvent{};
         current_started_ = false;
+        has_data_ = false;
     }
     buffer_.clear();
     return events;
@@ -55,6 +56,7 @@ std::vector<SseEvent> SseParser::process_buffer()
                 events.push_back(std::move(current_));
                 current_ = SseEvent{};
                 current_started_ = false;
+                has_data_ = false;
             }
             continue;
         }
@@ -78,7 +80,8 @@ std::vector<SseEvent> SseParser::process_buffer()
         }
         else if (field == "data")
         {
-            if (!current_.data.empty()) current_.data.push_back('\n');
+            if (has_data_) current_.data.push_back('\n');
+            has_data_ = true;
             current_.data += value;
         }
         // ignore "retry" and unknown fields

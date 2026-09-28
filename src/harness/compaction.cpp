@@ -102,15 +102,6 @@ int64_t estimate_text_and_image_chars(const std::vector<ContentBlock>& content)
     return chars;
 }
 
-bool is_whitespace_only(const std::string& s)
-{
-    for (char c : s)
-    {
-        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return false;
-    }
-    return true;
-}
-
 std::string safe_json_stringify(const Json& value)
 {
     try
@@ -193,8 +184,7 @@ Result<std::string, CompactionError> generate_summary_internal(
     opts.reasoning =
         thinkingLevel && *thinkingLevel != ThinkingLevel::Off ? thinkingLevel : std::nullopt;
 
-    const Message result =
-        transport->complete_chat(model, {Message::user(promptText)}, opts);
+    const Message result = transport->complete_chat(model, {Message::user(promptText)}, opts);
     if (result.stopReason == StopReason::Aborted)
     {
         return Result<std::string, CompactionError>::err_value(compaction_error(

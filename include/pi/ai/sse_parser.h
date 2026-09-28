@@ -36,6 +36,7 @@ class SseParser
     std::string buffer_;
     SseEvent current_;
     bool current_started_ = false;
+    bool has_data_ = false;
 };
 
 /** Parse a complete SSE payload in one call. */

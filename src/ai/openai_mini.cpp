@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <thread>
 
+#include "pi/ai/sse_parser.h"
+
 namespace openai
 {
 
@@ -30,8 +32,8 @@ json message_content_to_json(const ChatMessageContent& content)
             block["text"] = content.text;
             break;
         case ChatMessageContent::Type::Image:
-            block["type"] = "input_image";
-            if (!content.image_url.empty()) block["image_url"] = content.image_url;
+            block["type"] = "image_url";
+            if (!content.image_url.empty()) block["image_url"] = json{{"url", content.image_url}};
             break;
     }
     return block;
@@ -151,91 +153,6 @@ std::string extract_error_message(const json& payload)
     return {};
 }
 
-class SSEParser
-{
-   public:
-    std::vector<ServerSentEvent> feed(const char* data, std::size_t size)
-    {
-        buffer_.append(data, size);
-        return extract_events();
-    }
-
-    std::vector<ServerSentEvent> finalize()
-    {
-        buffer_.append("\n");
-        auto events = extract_events();
-        if (!current_.raw_lines.empty() || !current_.data.empty() || current_.event.has_value())
-        {
-            events.push_back(current_);
-            current_ = ServerSentEvent{};
-        }
-        buffer_.clear();
-        return events;
-    }
-
-   private:
-    static void trim_carriage_return(std::string& line)
-    {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-    }
-
-    std::vector<ServerSentEvent> extract_events()
-    {
-        std::vector<ServerSentEvent> events;
-        std::size_t start = 0;
-
-        while (true)
-        {
-            auto newline_pos = buffer_.find('\n', start);
-            if (newline_pos == std::string::npos) break;
-
-            std::string line = buffer_.substr(start, newline_pos - start);
-            trim_carriage_return(line);
-            start = newline_pos + 1;
-            process_line(line, events);
-        }
-
-        buffer_.erase(0, start);
-        return events;
-    }
-
-    void process_line(const std::string& line, std::vector<ServerSentEvent>& events)
-    {
-        if (line.empty())
-        {
-            if (!current_.raw_lines.empty() || !current_.data.empty() || current_.event.has_value())
-            {
-                events.push_back(current_);
-                current_ = ServerSentEvent{};
-            }
-            return;
-        }
-
-        if (!line.empty() && line.front() == ':') return;
-
-        current_.raw_lines.push_back(line);
-
-        auto colon_pos = line.find(':');
-        std::string field = colon_pos == std::string::npos ? line : line.substr(0, colon_pos);
-        std::string value =
-            colon_pos == std::string::npos ? std::string() : line.substr(colon_pos + 1);
-        if (!value.empty() && value.front() == ' ') value.erase(value.begin());
-
-        if (field == "event")
-        {
-            current_.event = value;
-        }
-        else if (field == "data")
-        {
-            if (!current_.data.empty()) current_.data.push_back('\n');
-            current_.data += value;
-        }
-    }
-
-    std::string buffer_;
-    ServerSentEvent current_;
-};
-
 class SSEEventStream
 {
    public:
@@ -258,7 +175,7 @@ class SSEEventStream
     }
 
    private:
-    void dispatch_events(std::vector<ServerSentEvent>&& events)
+    void dispatch_events(std::vector<pi::SseEvent>&& events)
     {
         if (events.empty()) return;
         for (const auto& event : events)
@@ -266,13 +183,17 @@ class SSEEventStream
             if (stopped_) break;
             if (handler_)
             {
-                const bool should_continue = handler_(event);
+                ServerSentEvent converted;
+                converted.event = event.event;
+                converted.data = event.data;
+                converted.raw_lines = event.rawLines;
+                const bool should_continue = handler_(converted);
                 if (!should_continue) stopped_ = true;
             }
         }
     }
 
-    SSEParser parser_;
+    pi::SseParser parser_;
     EventHandler handler_;
     bool stopped_ = false;
 };

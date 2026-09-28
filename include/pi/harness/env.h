@@ -52,7 +52,6 @@ class PosixShell : public Shell
 
    private:
     static void register_child(pid_t pid);
-    static void unregister_child(pid_t pid);
 
     static std::mutex children_mutex_;
     static std::set<pid_t> children_;

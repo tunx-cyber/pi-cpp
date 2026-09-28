@@ -1,10 +1,20 @@
 #include "pi/harness/agent_harness.h"
 
+#include <stdexcept>
+
 #include "pi/ai/model_registry.h"
 #include "pi/harness/system_prompt.h"
 
 namespace pi
 {
+namespace
+{
+template <typename T>
+void require_session_write(const Result<T, SessionError>& result)
+{
+    if (!result.ok) throw std::runtime_error("Session storage failed: " + result.error.message);
+}
+}  // namespace
 
 AgentHarness::AgentHarness(AgentHarnessOptions options)
     : session_(std::move(options.session)),
@@ -51,10 +61,7 @@ std::string AgentHarness::build_system_prompt() const
     return pi::build_system_prompt(system_prompt_base_, skills_);
 }
 
-void AgentHarness::resume()
-{
-    reload();
-}
+void AgentHarness::resume() { reload(); }
 
 void AgentHarness::reload()
 {
@@ -66,7 +73,7 @@ void AgentHarness::reload()
     agent_.set_thinking_level(thinking_level_);
 
     const auto context = session_.build_context();
-    if (!context.ok) return;
+    require_session_write(context);
     const auto& ctx = context.value;
     if (ctx.model)
     {
@@ -136,38 +143,38 @@ void AgentHarness::reset()
 
 void AgentHarness::set_model(const ModelInfo& model)
 {
+    require_session_write(session_.append_model_change(model.provider, model.id));
     model_ = model;
     pricing_.apply(model_);
     agent_.set_model(model_);
-    session_.append_model_change(model_.provider, model_.id);
 }
 
 void AgentHarness::set_thinking_level(ThinkingLevel level)
 {
+    require_session_write(session_.append_thinking_level_change(to_string(level)));
     thinking_level_ = level;
     agent_.set_thinking_level(level);
-    session_.append_thinking_level_change(to_string(level));
 }
 
 void AgentHarness::set_tools(std::vector<AgentTool> tools)
 {
+    std::vector<std::string> names;
+    for (const auto& tool : tools) names.push_back(tool.name);
+    require_session_write(session_.append_active_tools_change(names));
     tools_ = std::move(tools);
     agent_.set_tools(tools_);
-    std::vector<std::string> names;
-    for (const auto& tool : tools_) names.push_back(tool.name);
-    session_.append_active_tools_change(names);
 }
 
 void AgentHarness::persist_message(const AgentMessage& message)
 {
-    session_.append_message(message);
+    require_session_write(session_.append_message(message));
 }
 
 void AgentHarness::maybe_auto_compact()
 {
     if (!compaction_settings_.enabled) return;
     const auto branch = session_.get_branch();
-    if (!branch.ok) return;
+    require_session_write(branch);
     std::vector<AgentMessage> messages;
     for (const auto& entry : branch.value)
     {
@@ -177,7 +184,7 @@ void AgentHarness::maybe_auto_compact()
     if (!should_compact(estimate.tokens, model_.contextWindow, compaction_settings_)) return;
 
     std::string error;
-    compact(&error);
+    if (!compact(&error)) throw std::runtime_error("Automatic compaction failed: " + error);
 }
 
 Result<std::string, CompactionError> AgentHarness::run_compaction()

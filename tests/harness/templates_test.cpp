@@ -88,8 +88,10 @@ class TemplatesLoadTest : public ::testing::Test
 
 TEST_F(TemplatesLoadTest, LoadsFromDirectory)
 {
-    fs_->write_file(root_ + "/templates/hello.md", "---\ndescription: greeting\n---\n\nHello $1");
-    fs_->write_file(root_ + "/templates/other.txt", "not a template");
+    ASSERT_TRUE(fs_->write_file(root_ + "/templates/hello.md",
+                                "---\ndescription: greeting\n---\n\nHello $1")
+                    .ok);
+    ASSERT_TRUE(fs_->write_file(root_ + "/templates/other.txt", "not a template").ok);
     const auto result = load_prompt_templates(*fs_, {root_ + "/templates"});
     ASSERT_EQ(result.promptTemplates.size(), 1u);
     EXPECT_EQ(result.promptTemplates[0].name, "hello");
@@ -99,7 +101,7 @@ TEST_F(TemplatesLoadTest, LoadsFromDirectory)
 
 TEST_F(TemplatesLoadTest, LoadsSingleFile)
 {
-    fs_->write_file(root_ + "/single.md", "---\n---\n\nBody here");
+    ASSERT_TRUE(fs_->write_file(root_ + "/single.md", "---\n---\n\nBody here").ok);
     const auto result = load_prompt_templates(*fs_, {root_ + "/single.md"});
     ASSERT_EQ(result.promptTemplates.size(), 1u);
     EXPECT_EQ(result.promptTemplates[0].name, "single");
@@ -108,7 +110,7 @@ TEST_F(TemplatesLoadTest, LoadsSingleFile)
 
 TEST_F(TemplatesLoadTest, DescriptionFallsBackToFirstLine)
 {
-    fs_->write_file(root_ + "/t.md", "First line is the description\nSecond line");
+    ASSERT_TRUE(fs_->write_file(root_ + "/t.md", "First line is the description\nSecond line").ok);
     const auto result = load_prompt_templates(*fs_, {root_ + "/t.md"});
     ASSERT_EQ(result.promptTemplates.size(), 1u);
     EXPECT_EQ(result.promptTemplates[0].description, "First line is the description");

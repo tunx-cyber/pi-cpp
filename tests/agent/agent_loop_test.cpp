@@ -465,8 +465,7 @@ TEST(AgentLoopTest, AfterToolCallOverridesResult)
            const std::shared_ptr<std::atomic<bool>>&) -> AfterToolCallResult
     {
         AfterToolCallResult result;
-        result.hasContent = true;
-        result.content = {text_block("overridden")};
+        result.content = std::vector<ContentBlock>{text_block("overridden")};
         return result;
     };
     harness.transport->add_turn(
@@ -576,6 +575,59 @@ TEST(AgentTest, ContinueFromAssistantWithQueuedMessages)
     agent.follow_up(Message::user("follow"));
     agent.continue_run();
     EXPECT_EQ(agent.messages().size(), 4u);
+}
+
+TEST(AgentLoopTest, WorkerCountIsBoundedAndAfterHooksRunOnCallerThread)
+{
+    std::mutex mutex;
+    std::set<std::thread::id> worker_ids;
+    auto tool = make_tool("work");
+    tool.execute = [&](const std::string&, const Json&, const auto&, const auto&)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        worker_ids.insert(std::this_thread::get_id());
+        return ToolResult{};
+    };
+    LoopHarness harness({tool});
+    const auto caller = std::this_thread::get_id();
+    int hooks = 0;
+    harness.config.afterToolCall = [&](const AfterToolCallContext&, const auto&)
+    {
+        EXPECT_EQ(std::this_thread::get_id(), caller);
+        ++hooks;
+        return AfterToolCallResult{};
+    };
+    std::vector<ContentBlock> calls;
+    for (int i = 0; i < 64; ++i)
+        calls.push_back(tool_call_block(std::to_string(i), "work", Json{{"command", "run"}}));
+    harness.transport->add_turn(tool_turn(calls));
+    harness.transport->add_turn(text_turn("done"));
+    harness.run({Message::user("go")});
+    EXPECT_LE(worker_ids.size(), 8u);
+    EXPECT_EQ(hooks, 64);
+    for (int i = 0; i < 64; ++i)
+        EXPECT_EQ(harness.context.messages[static_cast<size_t>(i) + 2].toolCallId,
+                  std::to_string(i));
+}
+
+TEST(AgentTest, ThrowingSubscriberDoesNotPreventOtherSubscribersOrIdleCleanup)
+{
+    AgentOptions options;
+    options.model = scripted_model();
+    options.transport = std::make_shared<ScriptedTransport>();
+    Agent agent(options);
+    const auto unsubscribe = agent.subscribe([](const AgentEvent&, const auto&)
+                                             { throw std::runtime_error("subscriber failed"); });
+    int notified = 0;
+    agent.subscribe([&](const AgentEvent&, const auto&) { ++notified; });
+    EXPECT_THROW(agent.prompt("hello"), std::runtime_error);
+    EXPECT_GT(notified, 0);
+    EXPECT_FALSE(agent.is_busy());
+    EXPECT_FALSE(agent.is_streaming());
+    EXPECT_EQ(agent.error_message(), "subscriber failed");
+    agent.wait_for_idle();
+    unsubscribe();
+    EXPECT_NO_THROW(agent.prompt("retry"));
 }
 
 }  // namespace

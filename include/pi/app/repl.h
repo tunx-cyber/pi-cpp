@@ -97,6 +97,7 @@ class Repl
     std::string line_buffer_;
     size_t cursor_ = 0;
     bool streaming_ = false;
+    bool raw_mode_ = false;
     bool quit_requested_ = false;
     struct termios original_termios_;  // 进入 raw mode 前的终端设置，退出时完整恢复
     int rendered_lines_ = 1;  // draw_prompt 上次渲染的总行数（提示 + 多行输入 + 菜单）

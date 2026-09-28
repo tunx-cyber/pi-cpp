@@ -1,5 +1,7 @@
 #pragma once
 
+#include <condition_variable>
+
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -7,7 +9,7 @@
 #include <set>
 #include <string>
 #include <vector>
-#include <condition_variable>
+
 #include "pi/agent/agent_loop.h"
 #include "pi/agent/pending_queue.h"
 
@@ -55,7 +57,7 @@ class Agent
    public:
     Agent(AgentOptions options = {});
 
-    /** 订阅事件；返回取消函数。 */
+    /** 订阅事件；返回取消函数。监听器异常会报告为运行失败；失败通知再次抛异常时向调用者传播。 */
     std::function<void()> subscribe(AgentEventListener listener);
 
     bool is_streaming() const;
