@@ -129,22 +129,4 @@ std::optional<std::string> validate_tool_args(const AgentTool& tool, const Json&
     return std::nullopt;
 }
 
-Json parse_tool_args(const AgentTool& tool, const std::string& rawArgs)
-{
-    Json args = parse_streaming_json(rawArgs);
-    if (tool.prepareArguments)
-    {
-        try
-        {
-            Json prepared = tool.prepareArguments(args);
-            if (prepared.is_object()) args = std::move(prepared);
-        }
-        catch (...)
-        {
-            // shim 失败保留原始解析结果
-        }
-    }
-    return args;
-}
-
 }  // namespace pi

@@ -13,17 +13,10 @@ Agent::Agent(AgentOptions options)
       thinking_level_(options.thinkingLevel),
       tools_(std::move(options.tools)),
       messages_(std::move(options.messages)),
-      steering_queue_(options.steeringMode),
-      follow_up_queue_(options.followUpMode),
+      steering_queue_(),
       transport_(std::move(options.transport)),
       get_api_key_(std::move(options.getApiKey)),
-      convert_to_llm_(std::move(options.convertToLlm)),
-      transform_context_(std::move(options.transformContext)),
-      before_tool_call_(std::move(options.beforeToolCall)),
-      after_tool_call_(std::move(options.afterToolCall)),
-      prepare_next_turn_(std::move(options.prepareNextTurn)),
-      should_stop_after_turn_(std::move(options.shouldStopAfterTurn)),
-      tool_execution_(options.toolExecution)
+      should_stop_after_turn_(std::move(options.shouldStopAfterTurn))
 {
     if (options.systemPrompt) system_prompt_ = *options.systemPrompt;
 }
@@ -43,40 +36,10 @@ std::function<void()> Agent::subscribe(AgentEventListener listener)
     return [alive] { alive->store(false); };
 }
 
-bool Agent::is_streaming() const
-{
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return is_streaming_;
-}
-
-std::optional<AgentMessage> Agent::streaming_message() const
-{
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return streaming_message_;
-}
-
-std::set<std::string> Agent::pending_tool_calls() const
-{
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return pending_tool_calls_;
-}
-
-std::string Agent::error_message() const
-{
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return error_message_;
-}
-
 std::vector<AgentMessage> Agent::messages() const
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return messages_;
-}
-
-std::vector<AgentTool> Agent::tools() const
-{
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    return tools_;
 }
 
 std::string Agent::system_prompt() const
@@ -135,23 +98,6 @@ void Agent::set_transport(std::shared_ptr<TransportAdapter> transport)
 
 void Agent::steer(AgentMessage message) { steering_queue_.enqueue(std::move(message)); }
 
-void Agent::follow_up(AgentMessage message) { follow_up_queue_.enqueue(std::move(message)); }
-
-void Agent::clear_steering_queue() { steering_queue_.clear(); }
-
-void Agent::clear_follow_up_queue() { follow_up_queue_.clear(); }
-
-void Agent::clear_all_queues()
-{
-    clear_steering_queue();
-    clear_follow_up_queue();
-}
-
-bool Agent::has_queued_messages() const
-{
-    return steering_queue_.has_items() || follow_up_queue_.has_items();
-}
-
 void Agent::abort()
 {
     std::shared_ptr<std::atomic<bool>> signal;
@@ -178,11 +124,6 @@ void Agent::reset()
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
     messages_.clear();
-    is_streaming_ = false;
-    streaming_message_.reset();
-    pending_tool_calls_.clear();
-    error_message_.clear();
-    follow_up_queue_.clear();
     steering_queue_.clear();
 }
 
@@ -198,8 +139,7 @@ void Agent::prompt_messages(const std::vector<AgentMessage>& messages)
     if (is_busy())
     {
         throw std::runtime_error(
-            "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or "
-            "wait for "
+            "Agent is already processing a prompt. Use steer() to queue a message, or wait for "
             "completion.");
     }
     std::vector<AgentMessage> prompts = messages;
@@ -220,55 +160,6 @@ void Agent::prompt_messages(const std::vector<AgentMessage>& messages)
         });
 }
 
-void Agent::continue_run()
-{
-    if (is_busy())
-    {
-        throw std::runtime_error(
-            "Agent is already processing. Wait for completion before continuing.");
-    }
-    std::vector<AgentMessage> snapshot;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        snapshot = messages_;
-    }
-    if (snapshot.empty())
-    {
-        throw std::runtime_error("No messages to continue from");
-    }
-    if (snapshot.back().role == Role::Assistant)
-    {
-        const auto steering = steering_queue_.drain();
-        if (!steering.empty())
-        {
-            prompt_messages(steering);
-            return;
-        }
-        const auto follow_ups = follow_up_queue_.drain();
-        if (!follow_ups.empty())
-        {
-            prompt_messages(follow_ups);
-            return;
-        }
-        throw std::runtime_error("Cannot continue from message role: assistant");
-    }
-    run_with_lifecycle(
-        [this](const std::shared_ptr<std::atomic<bool>>& signal)
-        {
-            AgentContext context;
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                context.systemPrompt = system_prompt_;
-                context.messages = messages_;
-                context.tools = tools_;
-            }
-            auto config = make_loop_config();
-            run_agent_loop_continue(
-                context, config, [this, &signal](const AgentEvent& event)
-                { process_events(event, signal); }, signal);
-        });
-}
-
 AgentLoopConfig Agent::make_loop_config()
 {
     AgentLoopConfig config;
@@ -280,16 +171,9 @@ AgentLoopConfig Agent::make_loop_config()
                                : std::optional<ThinkingLevel>(thinking_level_);
         config.transport = transport_;
         config.getApiKey = get_api_key_;
-        config.toolExecution = tool_execution_;
-        config.convertToLlm = convert_to_llm_;
-        config.transformContext = transform_context_;
-        config.beforeToolCall = before_tool_call_;
-        config.afterToolCall = after_tool_call_;
-        config.prepareNextTurn = prepare_next_turn_;
         config.shouldStopAfterTurn = should_stop_after_turn_;
     }
     config.getSteeringMessages = [this]() { return steering_queue_.drain(); };
-    config.getFollowUpMessages = [this]() { return follow_up_queue_.drain(); };
     return config;
 }
 
@@ -308,12 +192,6 @@ void Agent::run_with_lifecycle(
         [this]() noexcept
         {
             {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                is_streaming_ = false;
-                streaming_message_.reset();
-                pending_tool_calls_.clear();
-            }
-            {
                 std::lock_guard<std::mutex> lock(busy_mutex_);
                 busy_ = false;
             }
@@ -322,13 +200,6 @@ void Agent::run_with_lifecycle(
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         abort_ = std::make_shared<std::atomic<bool>>(false);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        is_streaming_ = true;
-        streaming_message_.reset();
-        error_message_.clear();
     }
 
     try
@@ -353,7 +224,6 @@ void Agent::handle_run_failure(const std::exception& error, bool aborted,
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         model_snapshot = model_;
-        error_message_ = error.what();
     }
 
     Message failure;
@@ -381,7 +251,6 @@ void Agent::handle_run_failure(const std::exception& error, bool aborted,
     process_events(turn_end, signal);
     AgentEvent agent_end;
     agent_end.type = AgentEvent::Type::AgentEnd;
-    agent_end.messages = {failure};
     process_events(agent_end, signal);
 }
 
@@ -390,50 +259,10 @@ void Agent::process_events(const AgentEvent& event,
 {
     switch (event.type)
     {
-        case AgentEvent::Type::MessageStart:
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            streaming_message_ = event.message;
-            break;
-        }
-        case AgentEvent::Type::MessageUpdate:
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            streaming_message_ = event.message;
-            break;
-        }
         case AgentEvent::Type::MessageEnd:
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            streaming_message_.reset();
             messages_.push_back(event.message);
-            break;
-        }
-        case AgentEvent::Type::ToolExecutionStart:
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            pending_tool_calls_.insert(event.toolCallId);
-            break;
-        }
-        case AgentEvent::Type::ToolExecutionEnd:
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            pending_tool_calls_.erase(event.toolCallId);
-            break;
-        }
-        case AgentEvent::Type::TurnEnd:
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            if (event.message.role == Role::Assistant && !event.message.errorMessage.empty())
-            {
-                error_message_ = event.message.errorMessage;
-            }
-            break;
-        }
-        case AgentEvent::Type::AgentEnd:
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            streaming_message_.reset();
             break;
         }
         default:

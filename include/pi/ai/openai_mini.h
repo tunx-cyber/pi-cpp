@@ -74,6 +74,8 @@ struct ChatMessage
     std::vector<ChatMessageContent> content;
     std::optional<std::string> name;
     std::vector<ChatCompletionToolCall> tool_calls;
+    /** 额外消息字段（如 deepseek 的 reasoning_content / thinking signature），序列化时合并。 */
+    json extra = json::object();
 };
 
 struct ChatCompletionStreamOptions
@@ -92,7 +94,6 @@ struct ChatCompletionToolDefinition
 {
     std::string type;
     std::optional<ChatToolFunctionDefinition> function;
-    json raw = json::object();
 };
 
 struct ChatCompletionRequest
@@ -105,6 +106,8 @@ struct ChatCompletionRequest
     std::optional<std::string> reasoning_effort;
     std::vector<ChatCompletionToolDefinition> tools;
     std::optional<ChatCompletionStreamOptions> stream_options;
+    /** 额外顶层字段（如 deepseek 的 thinking），序列化时合并。 */
+    json extra = json::object();
 };
 
 struct RequestOptions
@@ -169,7 +172,7 @@ class OpenAIClient
     const ChatResource& chat() const { return chat_; }
 
     HttpResponse perform_request(const std::string& method, const std::string& path,
-                                 const std::string& body, const RequestOptions& options) const;
+                                 std::string body, const RequestOptions& options) const;
 
    private:
     ClientOptions options_;

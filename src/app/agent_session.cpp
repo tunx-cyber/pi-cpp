@@ -6,6 +6,7 @@
 
 #include "pi/agent/subagent_tool.h"
 #include "pi/ai/model_registry.h"
+#include "pi/harness/skills.h"
 
 namespace pi
 {
@@ -13,9 +14,23 @@ namespace pi
 namespace
 {
 
-/** 未知模型的兜底定义（用户自定义端点场景），镜像 pi 的 custom model 构造。 */
+/**
+ * 注册表里没有的模型（GET /models 返回的远端模型 / settings.json 里只有 id 的条目）。
+ * 优先继承同族模型的能力模板：端点只返回 id，不带 reasoning/上下文窗口，
+ * 若一律按纯文本模型处理，支持思考的模型（如 deepseek-flash）就会被错误限制成
+ * thinking=off。找不到同族模型时才退回保守默认值。
+ */
 ModelInfo make_custom_model(const std::string& model_id, const std::string& base_url)
 {
+    if (const auto template_model = find_model_template(model_id, base_url))
+    {
+        ModelInfo custom = *template_model;
+        custom.id = model_id;
+        custom.name = model_id;
+        custom.baseUrl = base_url;
+        return custom;
+    }
+
     ModelInfo custom;
     custom.id = model_id;
     custom.name = model_id;
@@ -29,6 +44,16 @@ ModelInfo make_custom_model(const std::string& model_id, const std::string& base
     return custom;
 }
 
+/** 把一轮消息的用量累加到 target（只统计四项 token，不累计金额）。 */
+void accumulate_usage(Usage& target, const Usage& delta)
+{
+    target.input += delta.input;
+    target.output += delta.output;
+    target.cacheRead += delta.cacheRead;
+    target.cacheWrite += delta.cacheWrite;
+    target.totalTokens += delta.totalTokens;
+}
+
 AgentHarnessOptions build_harness_options(const Settings& settings, const std::string& cwd)
 {
     AgentHarnessOptions options;
@@ -40,22 +65,31 @@ AgentHarnessOptions build_harness_options(const Settings& settings, const std::s
     {
         if (override->model) model_id = *override->model;
     }
-    if (const auto model = get_model(model_id))
+    // 未指定模型时保持空 ModelInfo：真正的默认模型由 ensure_model() 通过
+    // GET /models 确定（代码里不写死任何模型 id）。
+    if (!model_id.empty())
     {
-        options.model = *model;
-    }
-    else
-    {
-        options.model = make_custom_model(model_id, settings.baseUrl);
+        if (const auto model = get_model(model_id))
+        {
+            options.model = *model;
+        }
+        else
+        {
+            options.model = make_custom_model(model_id, settings.baseUrl);
+        }
     }
     options.thinkingLevel = settings.thinking;
-    options.pricing = settings.pricing;
     options.transport = make_openai_completions_transport(settings.baseUrl, settings.apiKey);
-    options.getApiKey = [&settings](const ModelInfo&) -> std::optional<std::string> {
+    options.getApiKey = [&settings](const ModelInfo&) -> std::optional<std::string>
+    {
         return settings.apiKey.empty() ? std::nullopt : std::optional<std::string>(settings.apiKey);
     };
     options.systemPromptBase = settings.systemPrompt;
     options.compactionSettings = settings.compaction;
+    // 技能清单写进 system prompt（模型按 location 自行 read SKILL.md）。
+    // 此前 options.skills 从未赋值：/skills 只打印列表，模型完全看不到技能。
+    PosixFileSystem fs(cwd);
+    options.skills = load_skills(fs, {Settings::expand_home("~/.pi-cpp/skills")}).skills;
     return options;
 }
 
@@ -76,9 +110,9 @@ AgentSession::AgentSession(Settings settings, std::string cwd)
                 event.message.stopReason != StopReason::Error &&
                 event.message.stopReason != StopReason::Aborted)
             {
-                std::lock_guard<std::mutex> lock(cost_mutex_);
-                total_cost_ += event.message.usage.cost.total;
-                all_time_cost_ += event.message.usage.cost.total;
+                std::lock_guard<std::mutex> lock(usage_mutex_);
+                accumulate_usage(session_usage_, event.message.usage);
+                accumulate_usage(all_time_usage_, event.message.usage);
                 last_turn_usage_ = event.message.usage;
             }
         });
@@ -90,15 +124,53 @@ std::optional<std::string> AgentSession::resolve_api_key() const
     return std::nullopt;
 }
 
-ModelInfo AgentSession::resolve_model() const
+std::optional<ModelInfo> AgentSession::resolve_model() const
 {
     std::string model_id = settings_.model;
     if (const auto override = settings_.override_for(cwd_))
     {
         if (override->model) model_id = *override->model;
     }
+    // 自动探测出的模型只在进程内有效（不落盘），新建会话时沿用它。
+    if (model_id.empty()) model_id = current_model_id_;
+    if (model_id.empty()) return std::nullopt;
     if (const auto model = get_model(model_id)) return *model;
     return make_custom_model(model_id, settings_.baseUrl);
+}
+
+bool AgentSession::ensure_model(std::string* errorOut)
+{
+    // 已有模型（会话记录 / settings.json / PI_MODEL）时不打扰端点。
+    if (!harness_.model().id.empty()) return true;
+
+    const auto list = list_models();
+    if (!list.error.empty())
+    {
+        std::string reason = "GET /models 失败：" + list.error;
+        // 端点返回 401/403 时最常见的根因是凭据缺失，直接给出可执行的提示。
+        if (settings_.apiKey.empty())
+        {
+            reason += "（未配置 API key：PI_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY）";
+        }
+        if (errorOut) *errorOut = reason;
+        return false;
+    }
+    if (list.models.empty())
+    {
+        if (errorOut) *errorOut = "端点未返回任何模型（GET /models 结果为空）";
+        return false;
+    }
+
+    // 默认模型 = 端点返回的第一个模型。只记在进程内（current_model_id_），不写
+    // settings_.model：否则后续 /thinking 等写配置动作会把它一起持久化。
+    // 只有用户主动 /model 选择才按 cwd 持久化。
+    const std::string model_id = list.models.front().id;
+    auto model = get_model(model_id);
+    if (!model) model = make_custom_model(model_id, settings_.baseUrl);
+
+    harness_.set_model(*model);
+    current_model_id_ = model_id;
+    return true;
 }
 
 void AgentSession::new_session()
@@ -109,9 +181,10 @@ void AgentSession::new_session()
     // /new 新建会话文件后必须清空 agent 内存中的 transcript，否则下一轮 prompt
     // 会把旧会话的历史一并发送给 LLM，导致上下文与会话文件（/resume 恢复结果）脱节。
     harness_.reset();
-    harness_.set_model(resolve_model());
+    // 模型可能尚未确定（等 ensure_model 从 GET /models 取），此时沿用 harness 当前模型。
+    if (const auto model = resolve_model()) harness_.set_model(*model);
     harness_.set_thinking_level(settings_.thinking);
-    reset_turn_cost();
+    reset_session_usage();
 }
 
 void AgentSession::resume()
@@ -183,6 +256,11 @@ bool AgentSession::resume_by_index(int index, std::string* errorOut)
 
 void AgentSession::prompt(const std::string& text, const std::vector<ContentBlock>& images)
 {
+    // 每轮开始清零"最近一次"用量：abort/失败后 UI 不应重复打印上一轮的 token 数。
+    {
+        std::lock_guard<std::mutex> lock(usage_mutex_);
+        last_turn_usage_ = Usage{};
+    }
     if (images.empty())
     {
         harness_.prompt(text);
@@ -202,37 +280,25 @@ void AgentSession::prompt(const std::string& text, const std::vector<ContentBloc
 
 void AgentSession::steer(AgentMessage message) { harness_.steer(std::move(message)); }
 
-void AgentSession::follow_up(AgentMessage message) { harness_.follow_up(std::move(message)); }
-
 void AgentSession::abort() { harness_.abort(); }
 
-void AgentSession::reset()
+Usage AgentSession::session_usage() const
 {
-    harness_.reset();
-    reset_turn_cost();
+    std::lock_guard<std::mutex> lock(usage_mutex_);
+    return session_usage_;
 }
 
-double AgentSession::total_cost() const
+Usage AgentSession::all_time_usage() const
 {
-    std::lock_guard<std::mutex> lock(cost_mutex_);
-    return total_cost_;
-}
-
-double AgentSession::all_time_cost() const
-{
-    std::lock_guard<std::mutex> lock(cost_mutex_);
-    return all_time_cost_;
+    std::lock_guard<std::mutex> lock(usage_mutex_);
+    return all_time_usage_;
 }
 
 Usage AgentSession::last_turn_usage() const
 {
-    std::lock_guard<std::mutex> lock(cost_mutex_);
+    std::lock_guard<std::mutex> lock(usage_mutex_);
     return last_turn_usage_;
 }
-
-bool AgentSession::is_busy() const { return harness_.is_busy(); }
-
-void AgentSession::wait_for_idle() { harness_.wait_for_idle(); }
 
 void AgentSession::set_tools(std::vector<AgentTool> tools)
 {
@@ -253,31 +319,35 @@ void AgentSession::set_tools(std::vector<AgentTool> tools)
 
 void AgentSession::set_model(const std::string& modelId)
 {
-    const auto model = get_model(modelId);
-    if (!model) return;
+    if (modelId.empty()) return;
+    // 注册表里没有的 id（例如运行时从 GET /models 选中的远端模型）按自定义模型接入：
+    // 沿用全局 baseUrl，缺省上下文窗口取 make_custom_model 的保守默认值。
+    auto model = get_model(modelId);
+    if (!model) model = make_custom_model(modelId, settings_.baseUrl);
     harness_.set_model(*model);
     settings_.model = modelId;
+    current_model_id_ = modelId;
+    // thinking 不做能力校验：真实请求失败时再把错误报给用户。
     settings_.set_override(cwd_, modelId, std::nullopt);
-    // 切换模型后，当前 thinking 级别可能不再被支持：自动回退到最近支持的级别，
-    // 保证"模型 ↔ thinking 级别"约束始终成立（/thinking 命令与设置文件同理）。
-    const auto current = harness_.thinking_level();
-    const auto clamped = clamp_thinking_level(*model, current);
-    if (clamped != current)
-    {
-        settings_.thinking = clamped;
-        settings_.set_override(cwd_, std::nullopt, clamped);
-        harness_.set_thinking_level(clamped);
-    }
 }
 
 void AgentSession::set_thinking(ThinkingLevel level)
 {
     harness_.set_thinking_level(level);
     settings_.thinking = level;
-    settings_.set_override(cwd_, std::nullopt, level);
+    // 保留该 cwd 已有的模型覆盖：set_override 传 nullopt 会删掉 model 键，
+    // 导致"先 /model 再 /thinking"悄悄丢掉按目录保存的模型选择。
+    std::optional<std::string> model_override;
+    if (const auto existing = settings_.override_for(cwd_)) model_override = existing->model;
+    settings_.set_override(cwd_, model_override, level);
 }
 
 bool AgentSession::compact(std::string* errorOut) { return harness_.compact(errorOut); }
+
+RemoteModelList AgentSession::list_models() const
+{
+    return list_remote_models(settings_.baseUrl, settings_.apiKey);
+}
 
 std::vector<SessionMetadata> AgentSession::list_sessions() const
 {
@@ -311,14 +381,14 @@ bool AgentSession::open_and_load(const SessionMetadata& metadata, std::string* e
     }
     harness_.session() = opened.value;
     harness_.reload();
-    reset_turn_cost();
+    reset_session_usage();
     return true;
 }
 
-void AgentSession::reset_turn_cost()
+void AgentSession::reset_session_usage()
 {
-    std::lock_guard<std::mutex> lock(cost_mutex_);
-    total_cost_ = 0;
+    std::lock_guard<std::mutex> lock(usage_mutex_);
+    session_usage_ = Usage{};
     last_turn_usage_ = Usage{};
 }
 

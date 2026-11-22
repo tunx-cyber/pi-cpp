@@ -25,10 +25,8 @@ AgentHarness::AgentHarness(AgentHarnessOptions options)
       get_api_key_(std::move(options.getApiKey)),
       model_(std::move(options.model)),
       thinking_level_(options.thinkingLevel),
-      pricing_(options.pricing),
       compaction_settings_(options.compactionSettings)
 {
-    pricing_.apply(model_);
     default_model_ = model_;
     default_thinking_level_ = thinking_level_;
     agent_.set_system_prompt(build_system_prompt());
@@ -37,21 +35,13 @@ AgentHarness::AgentHarness(AgentHarnessOptions options)
     agent_.set_tools(tools_);
     agent_.set_transport(transport_);
 
-    // 消息持久化 + 成本累计
+    // 消息持久化（用量随消息一起落盘）
     agent_.subscribe(
         [this](const AgentEvent& event, const std::shared_ptr<std::atomic<bool>>&)
         {
             if (event.type == AgentEvent::Type::MessageEnd)
             {
                 persist_message(event.message);
-            }
-            if (event.type == AgentEvent::Type::MessageEnd &&
-                event.message.role == Role::Assistant &&
-                event.message.stopReason != StopReason::Error &&
-                event.message.stopReason != StopReason::Aborted)
-            {
-                std::lock_guard<std::mutex> lock(cost_mutex_);
-                total_cost_ += event.message.usage.cost.total;
             }
         });
 }
@@ -81,7 +71,25 @@ void AgentHarness::reload()
         if (model)
         {
             model_ = *model;
-            pricing_.apply(model_);
+            agent_.set_model(model_);
+        }
+        else
+        {
+            // 会话记录的是运行时从 GET /models 选中的远端模型（注册表里没有元数据）：
+            // 先按 id/端点推断同族能力模板（reasoning/thinking 映射/上下文窗口），
+            // 再退回默认模型结构；两种情况都只把 id 换回会话记录值。
+            // 保留默认 provider/baseUrl，避免 custom provider 用模型自带 baseUrl
+            // 绕过全局 PI_BASE_URL 覆盖。
+            ModelInfo remote = default_model_;
+            if (const auto template_model =
+                    find_model_template(ctx.model->second, default_model_.baseUrl))
+            {
+                remote = *template_model;
+                if (!default_model_.baseUrl.empty()) remote.baseUrl = default_model_.baseUrl;
+            }
+            remote.id = ctx.model->second;
+            remote.name = ctx.model->second;
+            model_ = remote;
             agent_.set_model(model_);
         }
     }
@@ -112,40 +120,33 @@ void AgentHarness::reload()
     agent_.set_messages(ctx.messages);
 }
 
-void AgentHarness::prompt(const std::string& text)
-{
-    agent_.prompt(text);
-    maybe_auto_compact();
-}
+void AgentHarness::prompt(const std::string& text) { agent_.prompt(text); }
 
 void AgentHarness::prompt_messages(const std::vector<AgentMessage>& messages)
 {
     agent_.prompt_messages(messages);
-    maybe_auto_compact();
 }
 
 void AgentHarness::steer(AgentMessage message) { agent_.steer(std::move(message)); }
 
-void AgentHarness::follow_up(AgentMessage message) { agent_.follow_up(std::move(message)); }
-
-void AgentHarness::abort() { agent_.abort(); }
-
-bool AgentHarness::is_busy() const { return agent_.is_busy(); }
-
-void AgentHarness::wait_for_idle() { agent_.wait_for_idle(); }
-
-void AgentHarness::reset()
+void AgentHarness::abort()
 {
-    agent_.reset();
-    std::lock_guard<std::mutex> lock(cost_mutex_);
-    total_cost_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(compaction_mutex_);
+        if (compaction_abort_) compaction_abort_->store(true);
+    }
+    agent_.abort();
 }
+
+void AgentHarness::reset() { agent_.reset(); }
 
 void AgentHarness::set_model(const ModelInfo& model)
 {
     require_session_write(session_.append_model_change(model.provider, model.id));
     model_ = model;
-    pricing_.apply(model_);
+    // 切换后的模型同时成为默认模型：reload() 用它恢复"没有模型记录"的会话，
+    // 也保证启动时自动探测出的模型在 /resume、/new 之后仍然生效。
+    default_model_ = model;
     agent_.set_model(model_);
 }
 
@@ -168,23 +169,6 @@ void AgentHarness::set_tools(std::vector<AgentTool> tools)
 void AgentHarness::persist_message(const AgentMessage& message)
 {
     require_session_write(session_.append_message(message));
-}
-
-void AgentHarness::maybe_auto_compact()
-{
-    if (!compaction_settings_.enabled) return;
-    const auto branch = session_.get_branch();
-    require_session_write(branch);
-    std::vector<AgentMessage> messages;
-    for (const auto& entry : branch.value)
-    {
-        if (entry.type == SessionTreeEntry::Type::Message) messages.push_back(entry.message);
-    }
-    const auto estimate = estimate_context_tokens(messages);
-    if (!should_compact(estimate.tokens, model_.contextWindow, compaction_settings_)) return;
-
-    std::string error;
-    if (!compact(&error)) throw std::runtime_error("Automatic compaction failed: " + error);
 }
 
 Result<std::string, CompactionError> AgentHarness::run_compaction()
@@ -217,8 +201,18 @@ Result<std::string, CompactionError> AgentHarness::run_compaction()
         }
     }
 
-    const auto result = pi::compact(*preparation.value, model_, transport_, api_key,
-                                    std::make_shared<std::atomic<bool>>(false));
+    // 压缩走一次真实 LLM 调用：暴露中止信号，Esc 时 abort() 能立即打断。
+    auto compaction_signal = std::make_shared<std::atomic<bool>>(false);
+    {
+        std::lock_guard<std::mutex> lock(compaction_mutex_);
+        compaction_abort_ = compaction_signal;
+    }
+    const auto result =
+        pi::compact(*preparation.value, model_, transport_, api_key, compaction_signal);
+    {
+        std::lock_guard<std::mutex> lock(compaction_mutex_);
+        compaction_abort_.reset();
+    }
     if (!result.ok) return Result<std::string, CompactionError>::err_value(result.error);
 
     const auto appended =
@@ -253,8 +247,6 @@ bool AgentHarness::compact(std::string* errorOut)
 }
 
 std::vector<AgentMessage> AgentHarness::messages() const { return agent_.messages(); }
-
-std::vector<AgentTool> AgentHarness::tools() const { return agent_.tools(); }
 
 ModelInfo AgentHarness::model() const { return agent_.model(); }
 

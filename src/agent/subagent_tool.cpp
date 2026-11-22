@@ -26,8 +26,7 @@ AgentTool build_subagent_tool(const SubagentToolOptions& options, int depth);
 
 /** 在父工具线程上运行子 agent（内联，不跳线程）。 */
 ToolResult run_subagent(const SubagentToolOptions& options, const std::string& prompt, int depth,
-                        const std::shared_ptr<std::atomic<bool>>& signal,
-                        const std::function<void(const ToolResult&)>& onUpdate)
+                        const std::shared_ptr<std::atomic<bool>>& signal)
 {
     if (depth > options.maxNestingDepth)
     {
@@ -54,25 +53,6 @@ ToolResult run_subagent(const SubagentToolOptions& options, const std::string& p
     { return ++(*turns_used) >= max_turns; };
 
     Agent sub_agent(agent_options);
-
-    // 子 agent 流式文本转发为父的 tool_execution_update
-    sub_agent.subscribe(
-        [onUpdate](const AgentEvent& event, const std::shared_ptr<std::atomic<bool>>&)
-        {
-            if (event.type == AgentEvent::Type::MessageUpdate && event.assistantMessageEvent &&
-                onUpdate)
-            {
-                const auto& stream_event = *event.assistantMessageEvent;
-                if (stream_event.type == StreamEvent::Type::TextDelta)
-                {
-                    ToolResult partial;
-                    partial.content.push_back(ContentBlock{});
-                    partial.content.back().type = BlockType::Text;
-                    partial.content.back().text = stream_event.delta;
-                    onUpdate(partial);
-                }
-            }
-        });
 
     // abort 链：共享父工具的 signal（prompt 前已 abort 则直接失败）
     if (signal && signal->load())
@@ -163,18 +143,15 @@ AgentTool build_subagent_tool(const SubagentToolOptions& options, int depth)
         "Run a sub-agent to complete a focused subtask. The sub-agent has its own model, tools, "
         "and "
         "conversation. Returns the sub-agent's final answer wrapped in <subagent> tags.";
-    tool.label = "subagent";
     tool.executionMode = ToolExecutionMode::Sequential;
     tool.parameters =
         Json{{"type", "object"},
              {"properties",
               Json{{"prompt", Json{{"type", "string"}, {"description", "Subtask to complete"}}}}},
              {"required", Json::array({"prompt"})}};
-    tool.execute = [options, depth](
-                       const std::string&, const Json& args,
-                       const std::shared_ptr<std::atomic<bool>>& signal,
-                       const std::function<void(const ToolResult&)>& onUpdate) -> ToolResult
-    { return run_subagent(options, args.value("prompt", ""), depth, signal, onUpdate); };
+    tool.execute = [options, depth](const std::string&, const Json& args,
+                                    const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+    { return run_subagent(options, args.value("prompt", ""), depth, signal); };
     return tool;
 }
 

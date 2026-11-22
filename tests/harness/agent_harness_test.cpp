@@ -43,7 +43,6 @@ class AgentHarnessTest : public ::testing::Test
         AgentHarnessOptions options;
         options.session = session.value;
         options.model = pi_test::scripted_model();
-        options.compactionSettings.enabled = false;
         options.transport = std::make_shared<pi_test::ScriptedTransport>();
         harness = std::make_unique<AgentHarness>(std::move(options));
     }
@@ -57,8 +56,6 @@ TEST_F(AgentHarnessTest, MessageWriteFailureIsVisibleAndAgentBecomesIdle)
 {
     fs->fail_writes = true;
     EXPECT_THROW(harness->prompt("hello"), std::runtime_error);
-    EXPECT_FALSE(harness->is_busy());
-    harness->wait_for_idle();
     fs->fail_writes = false;
     EXPECT_NO_THROW(harness->prompt("retry"));
 }
@@ -76,7 +73,19 @@ TEST_F(AgentHarnessTest, FailedConfigurationWriteDoesNotChangeRuntimeConfigurati
     AgentTool tool;
     tool.name = "test";
     EXPECT_THROW(harness->set_tools({tool}), std::runtime_error);
-    EXPECT_TRUE(harness->tools().empty());
+}
+
+TEST_F(AgentHarnessTest, ReloadRestoresModelMissingFromRegistry)
+{
+    // 运行时从 GET /models 选中的模型不在注册表里，/resume 仍应恢复该模型 id
+    auto remote = harness->model();
+    remote.id = "remote-only-model";
+    harness->set_model(remote);
+    ASSERT_EQ(harness->model().id, "remote-only-model");
+
+    harness->reload();
+    EXPECT_EQ(harness->model().id, "remote-only-model");
+    EXPECT_EQ(harness->model().provider, remote.provider);
 }
 }  // namespace
 }  // namespace pi

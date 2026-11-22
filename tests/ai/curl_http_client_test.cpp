@@ -14,7 +14,7 @@ TEST(CurlHttpClientTest, CallbackFailureIsRethrownAndClientCanBeReused)
 {
     pi_test::FakeSseServer server;
     server.set_script({"data: hello\n\n"});
-    auto client = make_curl_http_client(std::make_shared<std::atomic<bool>>(false), {});
+    auto client = make_curl_http_client(std::make_shared<std::atomic<bool>>(false));
     openai::HttpRequest request;
     request.method = "POST";
     request.url = server.base_url() + "/chat/completions";
@@ -26,14 +26,20 @@ TEST(CurlHttpClientTest, CallbackFailureIsRethrownAndClientCanBeReused)
     EXPECT_EQ(response.body, "data: hello\n\n");
 }
 
-TEST(CurlHttpClientTest, BodyAugmentationFailureIsNotSilentlyIgnored)
+TEST(CurlHttpClientTest, PreservesErrorBodyForNonStreamingRequests)
 {
-    auto client =
-        make_curl_http_client(std::make_shared<std::atomic<bool>>(false), [](openai::json&)
-                              { throw std::runtime_error("invalid augmentation"); });
+    pi_test::FakeSseServer server;
+    server.set_handler([](const std::string&, const std::map<std::string, std::string>&)
+                       { return std::string(R"({"error":{"message":"boom"}})"); });
+    server.set_status(400);
+
+    auto client = make_curl_http_client(std::make_shared<std::atomic<bool>>(false));
     openai::HttpRequest request;
-    request.body = "{}";
-    EXPECT_THROW(client->request(request), std::runtime_error);
+    request.method = "GET";
+    request.url = server.base_url() + "/models";
+    const auto response = client->request(request);
+    EXPECT_EQ(response.status_code, 400);
+    EXPECT_NE(response.body.find("boom"), std::string::npos);
 }
 }  // namespace
 }  // namespace pi

@@ -10,7 +10,6 @@
 #include <set>
 
 #include "curl_http_client.h"
-#include "pi/ai/cost.h"
 #include "pi/ai/json_util.h"
 #include "pi/ai/openai_mini.h"
 
@@ -22,75 +21,20 @@ namespace
 
 using openai_json = nlohmann::json;
 
-/** 兼容性设置，镜像 pi 的 OpenAICompletionsCompat（detectCompat 的 deepseek 分支）。 */
+/**
+ * 端点兼容开关：只区分 DeepSeek 与通用 OpenAI 兼容端点。
+ * 不再维护 zai/moonshot/together/xai/cerebras 等 provider 分支（无内置模型、无测试）。
+ */
 struct Compat
 {
-    bool supportsStore = false;
-    bool supportsDeveloperRole = false;
-    bool supportsReasoningEffort = true;
-    bool supportsUsageInStreaming = true;
-    std::string maxTokensField = "max_completion_tokens";
-    bool requiresToolResultName = false;
-    bool requiresAssistantAfterToolResult = false;
-    bool requiresThinkingAsText = false;
-    bool requiresReasoningContentOnAssistantMessages = false;
-    std::string thinkingFormat = "openai";
-    bool supportsStrictMode = true;
+    /** DeepSeek：追加 thinking 参数、回放 reasoning_content、合成缺失的 reasoning 字段。 */
+    bool deepseek = false;
 };
 
 Compat detect_compat(const ModelInfo& model)
 {
-    const auto& baseUrl = model.baseUrl;
-    const bool isDeepSeek =
-        model.provider == "deepseek" || baseUrl.find("deepseek.com") != std::string::npos;
-    const bool isZai = model.provider == "zai" || baseUrl.find("api.z.ai") != std::string::npos;
-    const bool isMoonshot =
-        model.provider == "moonshotai" || baseUrl.find("api.moonshot.") != std::string::npos;
-    const bool isTogether = baseUrl.find("api.together.ai") != std::string::npos ||
-                            baseUrl.find("api.together.xyz") != std::string::npos;
-    const bool isGrok = model.provider == "xai" || baseUrl.find("api.x.ai") != std::string::npos;
-
-    const bool isNonStandard =
-        model.provider == "cerebras" || baseUrl.find("cerebras.ai") != std::string::npos ||
-        isTogether || baseUrl.find("chutes.ai") != std::string::npos ||
-        baseUrl.find("deepseek.com") != std::string::npos || isZai || isMoonshot;
-
-    // 维护提示：这些字段镜像 pi 的 OpenAICompletionsCompat，供未来 provider 分支启用。
-    // 目前所有 provider 都未启用 requiresToolResultName / requiresAssistantAfterToolResult /
-    // requiresThinkingAsText / supportsStore；新增 provider 时对照 pi 的 detectCompat 设置。
-    Compat compat;
-    compat.supportsStore = !isNonStandard;
-    compat.supportsDeveloperRole = !isNonStandard;
-    compat.supportsReasoningEffort = !isGrok && !isZai && !isMoonshot && !isTogether;
-    compat.maxTokensField = isMoonshot || isTogether ? "max_tokens" : "max_completion_tokens";
-    compat.requiresReasoningContentOnAssistantMessages = isDeepSeek;
-    compat.thinkingFormat = isDeepSeek   ? "deepseek"
-                            : isZai      ? "zai"
-                            : isTogether ? "together"
-                                         : "openai";
-    compat.supportsStrictMode = !isMoonshot && !isTogether;
-    return compat;
-}
-
-std::string normalize_tool_call_id(const std::string& id, const ModelInfo& model)
-{
-    if (id.find('|') != std::string::npos)
-    {
-        // 镜像 pi：带 | 的 id 取前段并替换非法字符（部分 provider 的 id 由模型名|调用号组成）。
-        const std::string call_id = id.substr(0, id.find('|'));
-        std::string sanitized;
-        for (char c : call_id)
-        {
-            bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-                      c == '_' || c == '-';
-            sanitized += ok ? c : '_';
-        }
-        // 截断到 40 字符（OpenAI tool call id 上限）；若净化后为空则保留原 id。
-        if (sanitized.size() > 40) sanitized.resize(40);
-        return sanitized.empty() ? id : sanitized;
-    }
-    if (model.provider == "openai" && id.size() > 40) return id.substr(0, 40);
-    return id;
+    return {model.provider == "deepseek" ||
+            model.baseUrl.find("deepseek.com") != std::string::npos};
 }
 
 constexpr const char* kNonVisionUserImagePlaceholder =
@@ -124,102 +68,22 @@ std::vector<ContentBlock> replace_images_with_placeholder(const std::vector<Cont
 }
 
 /**
- * 消息转换（镜像 pi 的 transformMessages）：
- * 非视觉模型图片降级、thinking 块跨模型处理、tool call id 归一化、
+ * 消息转换（镜像 pi 的 transformMessages）：非视觉模型图片降级、thinking 块跨模型处理、
  * 跳过 error/aborted 的 assistant 消息、为孤儿 tool call 补合成 toolResult。
+ *
+ * 单遍完成：每条消息只拷贝一次（旧实现第一遍转存、第二遍再拷一份）。
  */
 std::vector<Message> transform_messages(const std::vector<Message>& messages,
                                         const ModelInfo& model)
 {
-    std::map<std::string, std::string> tool_call_id_map;
-
-    std::vector<Message> transformed;
-    for (const auto& msg : messages)
-    {
-        Message out = msg;
-        if (msg.role == Role::User && !model.supports_images())
-        {
-            out.content =
-                replace_images_with_placeholder(msg.content, kNonVisionUserImagePlaceholder);
-        }
-        else if (msg.role == Role::ToolResult && !model.supports_images())
-        {
-            out.content =
-                replace_images_with_placeholder(msg.content, kNonVisionToolImagePlaceholder);
-        }
-        else if (msg.role == Role::Assistant)
-        {
-            const bool same_model =
-                msg.provider == model.provider && msg.api == model.api && msg.model == model.id;
-            std::vector<ContentBlock> content;
-            for (const auto& block : msg.content)
-            {
-                if (block.type == BlockType::Thinking)
-                {
-                    if (block.redacted)
-                    {
-                        if (same_model) content.push_back(block);
-                        continue;
-                    }
-                    if (same_model && !block.thinkingSignature.empty())
-                    {
-                        content.push_back(block);
-                        continue;
-                    }
-                    std::string trimmed;
-                    for (char c : block.thinking)
-                    {
-                        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') trimmed += c;
-                    }
-                    if (trimmed.empty()) continue;
-                    if (same_model)
-                    {
-                        content.push_back(block);
-                    }
-                    else
-                    {
-                        ContentBlock text;
-                        text.type = BlockType::Text;
-                        text.text = block.thinking;
-                        content.push_back(std::move(text));
-                    }
-                }
-                else if (block.type == BlockType::Text)
-                {
-                    content.push_back(block);
-                }
-                else if (block.type == BlockType::ToolCall)
-                {
-                    ContentBlock call = block;
-                    if (!same_model && !call.thoughtSignature.empty())
-                        call.thoughtSignature.clear();
-                    if (!same_model)
-                    {
-                        const std::string normalized = normalize_tool_call_id(call.id, model);
-                        if (normalized != call.id)
-                        {
-                            tool_call_id_map[call.id] = normalized;
-                            call.id = normalized;
-                        }
-                    }
-                    content.push_back(std::move(call));
-                }
-                else
-                {
-                    content.push_back(block);
-                }
-            }
-            out.content = std::move(content);
-        }
-        transformed.push_back(std::move(out));
-    }
-
-    // 第二遍：孤儿 tool call 补合成 toolResult
     std::vector<Message> result;
+    result.reserve(messages.size());
+
+    // 待补 synthetic toolResult 的 tool call（指向 result 中已稳定存放的 ContentBlock）
     std::vector<const ContentBlock*> pending_tool_calls;
     std::set<std::string> existing_tool_result_ids;
 
-    auto insert_synthetic = [&]()
+    const auto insert_synthetic = [&]()
     {
         if (pending_tool_calls.empty()) return;
         for (const auto* tc : pending_tool_calls)
@@ -233,35 +97,89 @@ std::vector<Message> transform_messages(const std::vector<Message>& messages,
         existing_tool_result_ids.clear();
     };
 
-    for (const auto& msg : transformed)
+    for (const auto& msg : messages)
     {
         if (msg.role == Role::Assistant)
         {
             insert_synthetic();
             if (msg.stopReason == StopReason::Error || msg.stopReason == StopReason::Aborted)
                 continue;
+
+            const bool same_model =
+                msg.provider == model.provider && msg.api == model.api && msg.model == model.id;
+            Message out = msg;
+            out.content.clear();
+            out.content.reserve(msg.content.size());
+            for (const auto& block : msg.content)
+            {
+                if (block.type == BlockType::Thinking)
+                {
+                    if (block.redacted)
+                    {
+                        if (same_model) out.content.push_back(block);
+                        continue;
+                    }
+                    if (same_model && !block.thinkingSignature.empty())
+                    {
+                        out.content.push_back(block);
+                        continue;
+                    }
+                    std::string trimmed;
+                    for (char c : block.thinking)
+                    {
+                        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') trimmed += c;
+                    }
+                    if (trimmed.empty()) continue;
+                    if (same_model)
+                    {
+                        out.content.push_back(block);
+                    }
+                    else
+                    {
+                        ContentBlock text;
+                        text.type = BlockType::Text;
+                        text.text = block.thinking;
+                        out.content.push_back(std::move(text));
+                    }
+                }
+                else if (block.type == BlockType::ToolCall && !same_model)
+                {
+                    ContentBlock call = block;
+                    if (!call.thoughtSignature.empty()) call.thoughtSignature.clear();
+                    out.content.push_back(std::move(call));
+                }
+                else
+                {
+                    out.content.push_back(block);
+                }
+            }
+            result.push_back(std::move(out));
             pending_tool_calls.clear();
             existing_tool_result_ids.clear();
-            for (const auto& block : msg.content)
+            for (const auto& block : result.back().content)
             {
                 if (block.type == BlockType::ToolCall) pending_tool_calls.push_back(&block);
             }
-            result.push_back(msg);
+            continue;
         }
-        else if (msg.role == Role::ToolResult)
+
+        if (msg.role == Role::User || msg.role == Role::ToolResult)
         {
-            existing_tool_result_ids.insert(msg.toolCallId);
-            result.push_back(msg);
+            if (msg.role == Role::User) insert_synthetic();
+            Message out = msg;
+            if (!model.supports_images())
+            {
+                out.content = replace_images_with_placeholder(
+                    msg.content, msg.role == Role::User ? kNonVisionUserImagePlaceholder
+                                                        : kNonVisionToolImagePlaceholder);
+            }
+            if (msg.role == Role::ToolResult) existing_tool_result_ids.insert(msg.toolCallId);
+            result.push_back(std::move(out));
+            continue;
         }
-        else if (msg.role == Role::User)
-        {
-            insert_synthetic();
-            result.push_back(msg);
-        }
-        else
-        {
-            result.push_back(msg);
-        }
+
+        insert_synthetic();
+        result.push_back(msg);
     }
     insert_synthetic();
     return result;
@@ -277,38 +195,27 @@ bool has_tool_history(const std::vector<Message>& messages)
     return false;
 }
 
-/**
- * 消息 → wire 格式（镜像 pi 的 convertMessages）。
- * 返回内置轻量 openai 客户端的 ChatMessage 列表，以及每条 assistant 消息需要注入的额外字段
- * （deepseek 的 reasoning_content），由 body augmenter 写回。
- */
+/** 消息 → wire 格式（镜像 pi 的 convertMessages）。额外字段挂在 ChatMessage::extra 上。 */
 struct ConvertedMessages
 {
     std::vector<openai::ChatMessage> messages;
-    // 不变量：assistantExtras[i] 与 messages 中第 i 条 assistant 消息一一对应（包括
-    // requiresAssistantAfterToolResult 插入的桥接消息，其 extras 为空对象）。
-    // body augmenter 依赖此顺序回注 deepseek 的 reasoning_content 等字段。
-    std::vector<openai_json> assistantExtras;
 };
 
 ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Message>& messages,
                                    const std::string& systemPrompt, const Compat& compat)
 {
     ConvertedMessages out;
-    const bool use_developer_role = model.reasoning && compat.supportsDeveloperRole;
 
     if (!systemPrompt.empty())
     {
         openai::ChatMessage sys;
-        sys.role = use_developer_role ? "developer" : "system";
+        sys.role = "system";
         openai::ChatMessageContent part;
         part.type = openai::ChatMessageContent::Type::Text;
         part.text = systemPrompt;
         sys.content.push_back(std::move(part));
         out.messages.push_back(std::move(sys));
     }
-
-    std::vector<openai_json> pending_extras;
 
     for (size_t i = 0; i < messages.size(); ++i)
     {
@@ -384,32 +291,15 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
             openai_json extra = openai_json::object();
             if (has_thoughts)
             {
-                if (compat.requiresThinkingAsText)
+                if (!assistant_text.empty())
                 {
-                    openai::ChatMessageContent part;
-                    part.type = openai::ChatMessageContent::Type::Text;
-                    part.text = joined_thinking;
-                    wire.content.push_back(std::move(part));
-                    if (!assistant_text.empty())
-                    {
-                        openai::ChatMessageContent text_part;
-                        text_part.type = openai::ChatMessageContent::Type::Text;
-                        text_part.text = assistant_text;
-                        wire.content.push_back(std::move(text_part));
-                    }
+                    openai::ChatMessageContent text_part;
+                    text_part.type = openai::ChatMessageContent::Type::Text;
+                    text_part.text = assistant_text;
+                    wire.content.push_back(std::move(text_part));
                 }
-                else
-                {
-                    if (!assistant_text.empty())
-                    {
-                        openai::ChatMessageContent text_part;
-                        text_part.type = openai::ChatMessageContent::Type::Text;
-                        text_part.text = assistant_text;
-                        wire.content.push_back(std::move(text_part));
-                    }
-                    // 用第一个 thinking 块的 signature 作为 reasoning 字段名
-                    if (!signature.empty()) extra[signature] = joined_thinking;
-                }
+                // 用第一个 thinking 块的 signature 作为 reasoning 字段名
+                if (!signature.empty()) extra[signature] = joined_thinking;
             }
             else if (!assistant_text.empty())
             {
@@ -434,8 +324,7 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
             }
             wire.tool_calls = std::move(tool_calls);
 
-            if (compat.requiresReasoningContentOnAssistantMessages && model.reasoning &&
-                !extra.contains("reasoning_content"))
+            if (compat.deepseek && model.reasoning && !extra.contains("reasoning_content"))
             {
                 extra["reasoning_content"] = "";
             }
@@ -445,7 +334,7 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
             {
                 continue;  // 跳过既无内容又无工具调用的 assistant 消息
             }
-            pending_extras.push_back(std::move(extra));
+            wire.extra = std::move(extra);
             out.messages.push_back(std::move(wire));
         }
         else if (msg.role == Role::ToolResult)
@@ -488,26 +377,12 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
                 part.text = text_result.empty() ? "(see attached image)" : text_result;
                 tool.content.push_back(std::move(part));
                 tool.tool_call_id = toolMsg.toolCallId;
-                if (compat.requiresToolResultName && !toolMsg.toolName.empty())
-                    tool.name = toolMsg.toolName;
                 out.messages.push_back(std::move(tool));
             }
             i = j - 1;
 
             if (!image_blocks.empty() && model.supports_images())
             {
-                if (compat.requiresAssistantAfterToolResult)
-                {
-                    openai::ChatMessage bridge;
-                    bridge.role = "assistant";
-                    openai::ChatMessageContent part;
-                    part.type = openai::ChatMessageContent::Type::Text;
-                    part.text = "I have processed the tool results.";
-                    bridge.content.push_back(std::move(part));
-                    out.messages.push_back(std::move(bridge));
-                    // 桥接消息同样占据一个 assistant 槽位，推送空 extras 保持序号对齐
-                    pending_extras.push_back(openai_json::object());
-                }
                 openai::ChatMessage user;
                 user.role = "user";
                 openai::ChatMessageContent label;
@@ -527,7 +402,6 @@ ConvertedMessages convert_messages(const ModelInfo& model, const std::vector<Mes
         }
     }
 
-    out.assistantExtras = std::move(pending_extras);
     return out;
 }
 
@@ -548,7 +422,7 @@ class OpenAiCompletionsTransport::Impl
                      const StreamRequestOptions& opts,
                      const std::function<void(const StreamEvent&)>& sink)
     {
-        // The underlying client and body augmenter are mutable per request.
+        // 客户端与 abort 信号按请求更新。
         std::lock_guard<std::mutex> lock(stream_mutex_);
         abort_ = opts.abort ? opts.abort : std::make_shared<std::atomic<bool>>(false);
 
@@ -589,42 +463,26 @@ class OpenAiCompletionsTransport::Impl
         const Compat compat = detect_compat(model);
         const std::string systemPrompt = opts.systemPrompt;
         const auto transformed = transform_messages(messages, model);
-        const auto converted = convert_messages(model, transformed, systemPrompt, compat);
+        auto converted = convert_messages(model, transformed, systemPrompt, compat);
 
-        // body augmenter 配置：top-level thinking + assistant 消息额外字段
+        // deepseek 的顶层 thinking 字段（直接并进请求体，不做 parse/dump）
         Json augment_config = Json::object();
-        if (model.reasoning && compat.thinkingFormat == "deepseek")
+        if (model.reasoning && compat.deepseek)
         {
             augment_config["thinking"] = Json{
                 {"type",
                  opts.reasoning && *opts.reasoning != ThinkingLevel::Off ? "enabled" : "disabled"}};
         }
-        Json extras = Json::array();
-        for (const auto& extra : converted.assistantExtras) extras.push_back(extra);
-        set_augmenter(augment_config, std::move(extras));
-
         openai::ChatCompletionRequest request;
         request.model = model.id;
-        request.messages = converted.messages;
-        if (opts.maxTokens)
-        {
-            if (compat.maxTokensField == "max_tokens")
-            {
-                request.max_tokens = *opts.maxTokens;
-            }
-            else
-            {
-                request.max_completion_tokens = *opts.maxTokens;
-            }
-        }
+        request.messages = std::move(converted.messages);
+        request.extra = augment_config;
+        if (opts.maxTokens) request.max_tokens = *opts.maxTokens;
         if (opts.temperature) request.temperature = *opts.temperature;
-        if (compat.supportsUsageInStreaming)
-        {
-            openai::ChatCompletionStreamOptions stream_options;
-            stream_options.include_usage = true;
-            request.stream_options = stream_options;
-        }
-        if (opts.reasoning && model.reasoning && compat.supportsReasoningEffort)
+        openai::ChatCompletionStreamOptions stream_options;
+        stream_options.include_usage = true;
+        request.stream_options = stream_options;
+        if (opts.reasoning && model.reasoning)
         {
             const auto level = *opts.reasoning;
             if (level != ThinkingLevel::Off)
@@ -645,7 +503,7 @@ class OpenAiCompletionsTransport::Impl
         // 工具（M3 才启用，先把转换写好）
         if (!opts.tools.empty())
         {
-            request.tools = convert_tools(opts.tools, compat);
+            request.tools = convert_tools(opts.tools);
         }
         else if (has_tool_history(messages))
         {
@@ -781,6 +639,13 @@ class OpenAiCompletionsTransport::Impl
     {
         if (abort_->load()) return false;
 
+        // 正常的流结束标记：不是 JSON，也不应计入 malformed chunk。
+        if (sse.data == "[DONE]")
+        {
+            ctx.hasFinishReason = true;
+            return false;
+        }
+
         Json chunk;
         try
         {
@@ -795,6 +660,26 @@ class OpenAiCompletionsTransport::Impl
         {
             ++ctx.malformedChunks;
             return !abort_->load();
+        }
+
+        // 部分网关/代理在 200 流内用 {"error":{...}} 报错：必须显式转成错误，
+        // 否则会被当成"没有 choices 的 chunk"吞掉，最终报成 finish_reason 缺失。
+        if (chunk.contains("error"))
+        {
+            const auto& error = chunk["error"];
+            std::string message;
+            if (error.is_object() && error.contains("message") && error["message"].is_string())
+            {
+                message = error["message"].get<std::string>();
+            }
+            else if (error.is_string())
+            {
+                message = error.get<std::string>();
+            }
+            ctx.output.stopReason = StopReason::Error;
+            ctx.output.errorMessage =
+                message.empty() ? "Provider returned an error chunk" : message;
+            return false;
         }
 
         auto& output = ctx.output;
@@ -815,7 +700,7 @@ class OpenAiCompletionsTransport::Impl
 
         if (chunk.contains("usage") && chunk["usage"].is_object())
         {
-            output.usage = parse_chunk_usage(chunk["usage"], ctx.model);
+            output.usage = parse_chunk_usage(chunk["usage"]);
         }
 
         Json choice;
@@ -829,7 +714,7 @@ class OpenAiCompletionsTransport::Impl
         {
             if (!chunk.contains("usage") && choice.contains("usage") && choice["usage"].is_object())
             {
-                output.usage = parse_chunk_usage(choice["usage"], ctx.model);
+                output.usage = parse_chunk_usage(choice["usage"]);
             }
 
             if (choice.contains("finish_reason") && choice["finish_reason"].is_string())
@@ -854,7 +739,7 @@ class OpenAiCompletionsTransport::Impl
                     event.type = StreamEvent::Type::TextDelta;
                     event.contentIndex = ctx.textBlockIndex;
                     event.delta = text;
-                    event.message = output;
+                    // 不随每个 delta 复制整条部分消息（O(n²)）：只有块边界/Done 事件携带 message。
                     ctx.sink(event);
                 }
 
@@ -880,7 +765,6 @@ class OpenAiCompletionsTransport::Impl
                     event.type = StreamEvent::Type::ThinkingDelta;
                     event.contentIndex = ctx.thinkingBlockIndex;
                     event.delta = text;
-                    event.message = output;
                     ctx.sink(event);
                 }
 
@@ -896,15 +780,14 @@ class OpenAiCompletionsTransport::Impl
                             toolCall["function"]["arguments"].is_string())
                         {
                             delta_text = toolCall["function"]["arguments"].get<std::string>();
+                            // 只累积参数；解析放在 finish_block 一次完成（每个 delta 解析是
+                            // O(n²)）。
                             ctx.partialArgs[block_index] += delta_text;
-                            output.content[block_index].arguments =
-                                parse_streaming_json(ctx.partialArgs[block_index]);
                         }
                         StreamEvent event;
                         event.type = StreamEvent::Type::ToolCallDelta;
                         event.contentIndex = block_index;
                         event.delta = delta_text;
-                        event.message = output;
                         ctx.sink(event);
                     }
                 }
@@ -1046,7 +929,7 @@ class OpenAiCompletionsTransport::Impl
         ctx.sink(event);
     }
 
-    static Usage parse_chunk_usage(const Json& raw, const ModelInfo& model)
+    static Usage parse_chunk_usage(const Json& raw)
     {
         Usage usage;
         int64_t prompt = raw.value("prompt_tokens", 0);
@@ -1068,7 +951,6 @@ class OpenAiCompletionsTransport::Impl
         usage.cacheRead = cache_read;
         usage.cacheWrite = cache_write;
         usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-        usage.cost = calculate_cost(model, usage);
         return usage;
     }
 
@@ -1091,7 +973,7 @@ class OpenAiCompletionsTransport::Impl
     }
 
     static std::vector<openai::ChatCompletionToolDefinition> convert_tools(
-        const std::vector<Tool>& tools, const Compat& compat)
+        const std::vector<Tool>& tools)
     {
         std::vector<openai::ChatCompletionToolDefinition> out;
         for (const auto& tool : tools)
@@ -1103,21 +985,9 @@ class OpenAiCompletionsTransport::Impl
             fn.description = tool.description;
             fn.parameters = tool.parameters;
             def.function = fn;
-            if (compat.supportsStrictMode)
-            {
-                def.raw["strict"] = false;
-            }
             out.push_back(std::move(def));
         }
         return out;
-    }
-
-    // ---- body augmenter：注入轻量客户端类型无法表达的开创字段 ----
-
-    void set_augmenter(const Json& topLevel, Json assistantExtras)
-    {
-        augment_config_ = topLevel;
-        assistant_extras_ = std::move(assistantExtras);
     }
 
     std::unique_ptr<openai::HttpClient> make_http_client();
@@ -1127,41 +997,12 @@ class OpenAiCompletionsTransport::Impl
     std::chrono::milliseconds timeout_;
     std::shared_ptr<std::atomic<bool>> abort_;
     std::unique_ptr<openai::OpenAIClient> client_;
-    Json augment_config_ = Json::object();
-    Json assistant_extras_ = Json::array();
     std::mutex stream_mutex_;
 };
 
 std::unique_ptr<openai::HttpClient> OpenAiCompletionsTransport::Impl::make_http_client()
 {
-    auto abort = abort_;
-    auto augmenter = [this](Json& body)
-    {
-        for (auto& [key, value] : augment_config_.items()) body[key] = value;
-        if (body.contains("messages") && body["messages"].is_array())
-        {
-            size_t assistant_index = 0;
-            for (auto& msg : body["messages"])
-            {
-                if (!msg.is_object()) continue;
-                if (msg.value("role", "") == "assistant")
-                {
-                    // 依赖 ConvertedMessages 的序号对应不变量（见 convert_messages）；
-                    // 超出范围时跳过注入而不是错配。
-                    if (assistant_index < assistant_extras_.size() &&
-                        !assistant_extras_[assistant_index].is_null())
-                    {
-                        for (auto& [key, value] : assistant_extras_[assistant_index].items())
-                            msg[key] = value;
-                    }
-                    if (!msg.contains("content") && msg.contains("tool_calls"))
-                        msg["content"] = nullptr;
-                    ++assistant_index;
-                }
-            }
-        }
-    };
-    return make_curl_http_client(abort, std::move(augmenter));
+    return make_curl_http_client(abort_);
 }
 
 OpenAiCompletionsTransport::OpenAiCompletionsTransport(std::string baseUrl, std::string apiKey,

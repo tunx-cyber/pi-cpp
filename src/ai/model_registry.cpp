@@ -10,7 +10,9 @@ namespace pi
 namespace
 {
 
-// 镜像 pi models.generated.ts 中 deepseek provider 的两个模型
+// 镜像 pi models.generated.ts 中 deepseek provider 的两个模型。
+// 仅提供元数据（上下文窗口 / maxTokens / thinking 映射）：代码里没有"默认模型"，
+// 默认模型由端点 GET /models 决定（见 AgentSession::ensure_model）。
 ModelInfo deepseek_v4_flash()
 {
     ModelInfo m;
@@ -26,10 +28,6 @@ ModelInfo deepseek_v4_flash()
         {ThinkingLevel::Xhigh, "max"},
     };
     m.input = {"text"};
-    m.costInput = 1.0;
-    m.costOutput = 2.0;
-    m.costCacheRead = 0.02;
-    m.costCacheWrite = 0;
     m.contextWindow = 1000000;
     m.maxTokens = 384000;
     return m;
@@ -40,10 +38,6 @@ ModelInfo deepseek_v4_pro()
     ModelInfo m = deepseek_v4_flash();
     m.id = "deepseek-v4-pro";
     m.name = "DeepSeek V4 Pro";
-    m.costInput = 3.0;    // 人民币元/M（原美元 0.435 × 7.2 汇率）
-    m.costOutput = 6.0;
-    m.costCacheRead = 0.025;
-    m.costCacheWrite = 0;
     return m;
 }
 
@@ -60,6 +54,44 @@ std::mutex& registry_mutex()
 {
     static std::mutex mutex;
     return mutex;
+}
+
+std::string ascii_lower(std::string value)
+{
+    for (char& c : value)
+    {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return value;
+}
+
+size_t common_prefix_length(const std::string& a, const std::string& b)
+{
+    size_t i = 0;
+    while (i < a.size() && i < b.size() && a[i] == b[i]) ++i;
+    return i;
+}
+
+/** 提取 URL 的 host（去掉 scheme / userinfo / 端口 / 路径）。 */
+std::string endpoint_host(const std::string& url)
+{
+    std::string rest = url;
+    if (const auto scheme = rest.find("://"); scheme != std::string::npos)
+    {
+        rest = rest.substr(scheme + 3);
+    }
+    if (const auto slash = rest.find_first_of("/?#"); slash != std::string::npos)
+    {
+        rest = rest.substr(0, slash);
+    }
+    if (const auto at = rest.rfind('@'); at != std::string::npos) rest = rest.substr(at + 1);
+    if (!rest.empty() && rest.front() == '[')  // IPv6 字面量：[::1]:8080
+    {
+        const auto close = rest.find(']');
+        if (close != std::string::npos) return ascii_lower(rest.substr(0, close + 1));
+    }
+    if (const auto colon = rest.find(':'); colon != std::string::npos) rest = rest.substr(0, colon);
+    return ascii_lower(rest);
 }
 
 }  // namespace
@@ -123,48 +155,47 @@ std::vector<ModelInfo> get_models(const std::string& provider)
     return out;
 }
 
-std::vector<ThinkingLevel> get_supported_thinking_levels(const ModelInfo& model)
+std::optional<ModelInfo> find_model_template(const std::string& modelId, const std::string& baseUrl)
 {
-    static const std::vector<ThinkingLevel> kAll = {
-        ThinkingLevel::Off,    ThinkingLevel::Minimal, ThinkingLevel::Low,
-        ThinkingLevel::Medium, ThinkingLevel::High,    ThinkingLevel::Xhigh,
-    };
-    if (!model.reasoning) return {ThinkingLevel::Off};
+    std::lock_guard<std::mutex> lock(registry_mutex());
+    const auto& list = models();
+    const std::string id = ascii_lower(modelId);
 
-    std::vector<ThinkingLevel> supported;
-    for (auto level : kAll)
+    // 1) id 前缀与 provider 一致：deepseek-flash / deepseek-v4-pro-2025 → deepseek 家族。
+    //    多个候选时取与目标 id 公共前缀最长的一个，尽量贴近具体型号的能力。
+    const ModelInfo* best = nullptr;
+    size_t best_shared = 0;
+    for (const auto& model : list)
     {
-        const auto it = model.thinkingLevelMap.find(level);
-        // 显式 null 标记为不支持；xhigh 仅当有映射值才支持；其余（未映射或映射为值）支持
-        if (it != model.thinkingLevelMap.end() && !it->second.has_value()) continue;
-        if (level == ThinkingLevel::Xhigh && it == model.thinkingLevelMap.end()) continue;
-        supported.push_back(level);
+        const std::string provider = ascii_lower(model.provider);
+        if (provider.empty() || id.compare(0, provider.size(), provider) != 0) continue;
+        if (id.size() > provider.size())
+        {
+            const char separator = id[provider.size()];
+            if (separator != '-' && separator != '_' && separator != '/' && separator != ':')
+            {
+                continue;  // deepseekXYZ 不算同一家族
+            }
+        }
+        const size_t shared = common_prefix_length(id, ascii_lower(model.id));
+        if (best == nullptr || shared > best_shared)
+        {
+            best = &model;
+            best_shared = shared;
+        }
     }
-    return supported;
-}
+    if (best != nullptr) return *best;
 
-ThinkingLevel clamp_thinking_level(const ModelInfo& model, ThinkingLevel level)
-{
-    const auto available = get_supported_thinking_levels(model);
-    if (std::find(available.begin(), available.end(), level) != available.end()) return level;
-
-    static const std::vector<ThinkingLevel> kOrder = {
-        ThinkingLevel::Off,    ThinkingLevel::Minimal, ThinkingLevel::Low,
-        ThinkingLevel::Medium, ThinkingLevel::High,    ThinkingLevel::Xhigh,
-    };
-    auto it = std::find(kOrder.begin(), kOrder.end(), level);
-    if (it == kOrder.end()) return available.empty() ? ThinkingLevel::Off : available[0];
-
-    for (auto jt = it; jt != kOrder.end(); ++jt)
+    // 2) 端点 host 一致：同一服务商的模型共享同一套能力（如 api.deepseek.com）
+    const std::string host = endpoint_host(baseUrl);
+    if (!host.empty())
     {
-        if (std::find(available.begin(), available.end(), *jt) != available.end()) return *jt;
+        for (const auto& model : list)
+        {
+            if (endpoint_host(model.baseUrl) == host) return model;
+        }
     }
-    for (auto jt = it; jt != kOrder.begin();)
-    {
-        --jt;
-        if (std::find(available.begin(), available.end(), *jt) != available.end()) return *jt;
-    }
-    return available.empty() ? ThinkingLevel::Off : available[0];
+    return std::nullopt;
 }
 
 bool models_are_equal(const ModelInfo& a, const ModelInfo& b)

@@ -36,17 +36,41 @@ echo "hello" | ./build/picpp
 ./build/picpp --resume <id> "继续刚才的任务"
 ```
 
-API key 自动从以下位置读取（优先级从低到高）：`~/.pi-cpp/.env`、当前目录向上最近的项目 `.env`（`DEEPSEEK_API_KEY` / `OPENAI_API_KEY`）、环境变量 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `PI_API_KEY`。端点/模型可用 `PI_BASE_URL` / `PI_MODEL` 覆盖。
+### API key 配置
 
-REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /quit`。
+API key 按以下优先级自动解析（`src/app/settings.cpp` 的 `Settings::load()`）：
 
-- `/sessions` 列出历史会话（序号 / 时间 / 首条消息预览 / 消息数，标出当前会话）
+| 优先级 | 来源 |
+|---|---|
+| 1（最高） | 环境变量 `PI_API_KEY` |
+| 2 | 环境变量 `DEEPSEEK_API_KEY` |
+| 3 | 环境变量 `OPENAI_API_KEY` |
+| 4 | 项目 `.env`（从 cwd 向上逐级找最近的，变量名同上） |
+| 5 | `~/.pi-cpp/.env`（全局） |
+
+每个变量名内部依次查「进程环境变量 → 项目 `.env` → `~/.pi-cpp/.env`」；`.env` 解析支持 `#` 注释与引号。**API key 与全局端点不读 settings.json**：端点只来自 `PI_BASE_URL`（默认 `https://api.deepseek.com`，见 `settings.h`），模型可用 `PI_MODEL` 覆盖。旧 `settings.json` 里的 `apiKey` / `baseUrl` 键会被忽略，并在下次保存时移除。
+
+请求链路：key 注入传输层后，发送时放入 HTTP 头 `Authorization: Bearer <key>`；context compaction 与子 agent 通过 `getApiKey` 回调按需获取；DeepSeek `web_search` 工具会同时发 `x-api-key` 与 `Authorization` 两个头（兼容官方端点与 Anthropic 兼容代理）。若最终为空，请求直接报错提示设置上述变量。`settings.json` 不再保存凭据，写回权限仍为 `0600`（兼容旧文件中可能残留的凭据）。
+
+REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /memory /cost /context /quit`。
+
+- `/sessions` 列出历史会话（序号 / 时间 / 首条消息预览 / 消息数，标出当前会话）；流式扫描元数据，不把整份会话读进内存
 - `/resume` 恢复最近会话；`/resume <序号>` 或 `/resume <id 前缀>` 恢复到指定会话（类似 `claude --resume`）
+- `/model` 无参时请求 OpenAI 兼容端点的 `GET {baseUrl}/models`，用 ↑/↓ 选择、Enter 确认、Esc 取消；`/model <id>` 直接切换，`Ctrl+P` 循环切换
+- `/thinking` 无参时同样用 ↑/↓ 选择（off/minimal/low/medium/high/xhigh），`/thinking <级别>` 直接设置；不做模型能力预校验，真实请求失败会把错误显示出来
+- 默认模型不写死：启动时若没有已配置/已保存的模型，取 `GET /models` 返回的第一个模型；端点不可达时状态栏显示 `[model=未选择]`，选好模型前不会发送请求
+- 端点只返回模型 id：`deepseek-*` 等远端 id 会自动继承同族模型的能力（reasoning / thinking 映射 / 上下文窗口），因此 `/thinking` 对这类模型仍可用（off/high/xhigh）
+- `/cost` 显示当前会话、最近一次调用与进程累计的 input / output / cacheRead / cacheWrite / total token 数。单价无法确定，因此只记录 token，不显示金额
+- `/context` 显示当前上下文的 token 估算（字符数/4，图片按 4800）与模型上限占用百分比
+- `/compact` 手动压缩上下文（worker 线程执行，压缩期间 Esc 可取消）；**不再自动压缩**，长会话由 `/context` 观察、需要时手动压缩
+- 启动默认**新会话**；`--resume [id]` 或 `/resume` 恢复历史，恢复后会回放完整对话
+- 主题：`settings.json` 的 `"theme": "default" | "mono"`，`NO_COLOR=1` 自动切到无颜色
 
-- 输入 `/` 唤起命令菜单（实时过滤 + Tab 补全）
+- 输入 `/` 唤起命令菜单（实时过滤）：`↑`/`↓` 选择、`Tab` 补全、`Enter` 执行
 - 输入：`Enter`=提交，`Shift+Enter`/`Ctrl+J`/`Option+Enter`=换行（多行输入；Shift+Enter 需终端支持 CSI-u/kitty 键盘协议：iTerm2/kitty/WezTerm）
 - 流式中：`Enter`=steer（排队下一句）、`Esc`=abort、`Ctrl+C`=退出（确认）、`Ctrl+P`=切模型、`Ctrl+L`=重绘
-- `/tools` 启用编码工具：read / bash / edit / write / grep / find / ls / web_fetch / web_search + subagent（子 agent 嵌套）。web_search 走 DeepSeek Anthropic 兼容 Messages API（原生 `web_search_20250305`），需 `DEEPSEEK_API_KEY`。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
+- 编码工具默认启用：read / bash / edit / write / grep / find / ls / web_fetch / web_search + subagent（子 agent 嵌套），`/tools` 可重新加载。web_search 走 DeepSeek Anthropic 兼容 Messages API（原生 `web_search_20250305`），需 `DEEPSEEK_API_KEY`。**注意：bash 工具无人工确认审批**，agent 会自主执行 shell 命令，仅建议个人终端使用
+- skills：`~/.pi-cpp/skills/**/SKILL.md` 启动时加载并写入 system prompt（模型按 location 自行读取）；`/skills` 查看清单
 - 会话保存在 `~/.pi-cpp/agent/sessions/<cwd>/<ts>_<id>.jsonl`（pi 兼容 version-3 格式），重启后 `/resume` 恢复
 - 用户模板：`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`（支持 `$1`/`$@`/`${@:N:L}`）
 
@@ -58,14 +82,15 @@ REPL 命令：`/help /model /thinking /compact /clear /new /resume /sessions /im
 include/pi/
 ├── ai/       Json 别名 + TransportAdapter 接口（唯一知道 HTTP/SSE 的层）
 │             openai_transport：内置轻量 openai 客户端实现（流式 SSE/usage/thinking/工具调用/abort）
-│             model_registry：deepseek-v4-flash / deepseek-v4-pro + 运行时 override
-│             cost：价格/1e6 × token（纯函数）；sse_parser：独立 SSE 帧解析
-├── agent/    Agent（prompt/continue/steer/followUp/abort/reset/subscribe/waitForIdle）
+│             model_registry：内置模型元数据（deepseek-v4-flash / deepseek-v4-pro）+ 运行时 override
+│             model_list：GET /models → 可用模型列表与默认模型来源
+│             sse_parser：独立 SSE 帧解析
+├── agent/    Agent（prompt/steer/abort/reset/subscribe/waitForIdle）
 │             agent_loop（双队列注入时机、串/并行工具批次、钩子、terminate 语义）
 │             json_schema（内置轻量 JSON Schema 校验）、subagent_tool（嵌套/事件转发/abort 链/深度轮次防护）
-├── harness/  Session（JSONL version-3，leaf 跟踪）+ JsonlSessionRepo
+├── harness/  Session（JSONL version-3，线性历史）+ JsonlSessionRepo
 │             compaction（切点/估算/摘要）、skills（SKILL.md）、prompt_templates
-│             AgentHarness（消息持久化 + 自动压缩 + 模型/thinking 恢复）
+│             AgentHarness（消息持久化 + 模型/thinking 恢复）
 │             env（POSIX FileSystem + Shell，abort 感知）
 └── app/      settings（按 cwd 持久化）、images（stb ≤2000px resize + base64）
               commands（slash + 编码工具）、repl（raw mode + 事件泵 + 状态栏 + 进程内存监控）
@@ -89,7 +114,7 @@ cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
 python3 scripts/check_format.py
 ```
 
-测试对照 pi 的 vitest 套件：`cost_test`、`sse_parser_test`、`transport_test`（fake SSE server + 录制 fixture）、`agent_loop_test`（脚本化 transport）、`session_test`/`compaction_test`/`skills_test`/`templates_test`、`subagent_tool_test`。
+测试对照 pi 的 vitest 套件：`sse_parser_test`、`transport_test`（fake SSE server + 录制 fixture）、`agent_loop_test`（脚本化 transport）、`session_test`/`compaction_test`/`skills_test`/`templates_test`、`subagent_tool_test`。
 
 ## 里程碑状态
 

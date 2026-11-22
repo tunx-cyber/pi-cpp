@@ -91,7 +91,7 @@ void make_nonblocking(int fd)
 }
 
 void drain(int fd, std::string& output, const std::function<void(const std::string&)>& callback,
-           size_t budget = 65536)
+           size_t budget = 65536, size_t max_bytes = 0, size_t* truncated = nullptr)
 {
     char buffer[4096];
     // Yield to cancellation/timeout checks even if a child writes continuously.
@@ -101,8 +101,19 @@ void drain(int fd, std::string& output, const std::function<void(const std::stri
         if (count > 0)
         {
             budget -= static_cast<size_t>(count);
-            output.append(buffer, static_cast<size_t>(count));
-            if (callback) callback(std::string(buffer, static_cast<size_t>(count)));
+            // 超出上限的字节继续读走（避免子进程写阻塞）但不再驻留内存。
+            size_t keep = static_cast<size_t>(count);
+            if (max_bytes > 0)
+            {
+                const size_t room = output.size() < max_bytes ? max_bytes - output.size() : 0;
+                keep = std::min(keep, room);
+                if (truncated) *truncated += static_cast<size_t>(count) - keep;
+            }
+            if (keep > 0)
+            {
+                output.append(buffer, keep);
+                if (callback) callback(std::string(buffer, keep));
+            }
         }
         else if (count < 0 && errno == EINTR)
         {
@@ -244,8 +255,10 @@ Result<ExecResult, ExecutionError> PosixShell::exec(const std::string& command,
                                 {error_pipe.read.get(), POLLIN, 0}};
                 if (poll(fds, 2, 50) < 0 && errno != EINTR)
                     return failure(ExecutionErrorCode::Unknown, std::strerror(errno));
-                drain(output_pipe.read.get(), result.stdout, options.onStdout);
-                drain(error_pipe.read.get(), result.stderr, options.onStderr);
+                drain(output_pipe.read.get(), result.stdout, options.onStdout, 65536,
+                      options.maxOutputBytes, &result.truncatedBytes);
+                drain(error_pipe.read.get(), result.stderr, options.onStderr, 65536,
+                      options.maxOutputBytes, &result.truncatedBytes);
                 std::lock_guard<std::mutex> children_lock(children_mutex_);
                 const pid_t waited = waitpid(pid, &status, WNOHANG);
                 if (waited == pid)
@@ -267,7 +280,8 @@ Result<ExecResult, ExecutionError> PosixShell::exec(const std::string& command,
                 int available = 0;
                 if (ioctl(fd, FIONREAD, &available) < 0)
                     throw std::runtime_error(std::strerror(errno));
-                drain(fd, output, callback, static_cast<size_t>(available));
+                drain(fd, output, callback, static_cast<size_t>(available), options.maxOutputBytes,
+                      &result.truncatedBytes);
             };
             drain_remaining(output_pipe.read.get(), result.stdout, options.onStdout);
             drain_remaining(error_pipe.read.get(), result.stderr, options.onStderr);

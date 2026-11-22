@@ -14,11 +14,10 @@ AgentTool object_schema_tool()
 {
     AgentTool tool;
     tool.name = "edit";
-    tool.parameters = Json{
-        {"type", "object"},
-        {"properties", Json{{"path", Json{{"type", "string"}}},
-                            {"maxLines", Json{{"type", "integer"}}}}},
-        {"required", Json::array({"path"})}};
+    tool.parameters = Json{{"type", "object"},
+                           {"properties", Json{{"path", Json{{"type", "string"}}},
+                                               {"maxLines", Json{{"type", "integer"}}}}},
+                           {"required", Json::array({"path"})}};
     return tool;
 }
 
@@ -90,10 +89,10 @@ TEST(JsonSchemaTest, EnumEnforcesMembership)
 {
     AgentTool tool;
     tool.name = "color";
-    tool.parameters = Json{{"type", "object"},
-                           {"properties",
-                            Json{{"mode", Json{{"type", "string"},
-                                               {"enum", Json::array({"a", "b"})}}}}}};
+    tool.parameters =
+        Json{{"type", "object"},
+             {"properties",
+              Json{{"mode", Json{{"type", "string"}, {"enum", Json::array({"a", "b"})}}}}}};
     EXPECT_FALSE(validate_tool_args(tool, Json{{"mode", "a"}}).has_value());
     EXPECT_TRUE(validate_tool_args(tool, Json{{"mode", "c"}}).has_value());
 }

@@ -98,28 +98,27 @@ TEST_F(SessionTest, ListFindsSessionsSortedByRecency)
     EXPECT_EQ(sessions.value[1].id, first.value.metadata().id);
 }
 
-TEST_F(SessionTest, BranchAndLabelSupport)
+TEST_F(SessionTest, RejectsTypeMismatchedHeaderWithoutThrowing)
 {
-    JsonlSessionRepo repo(*fs_, root_ + "/sessions");
-    const auto created = repo.create(root_);
-    ASSERT_TRUE(created.ok);
-    auto session = created.value;
+    // 合法 JSON 但 version 类型错误：应返回 Result 错误而不是抛异常终止进程
+    ASSERT_TRUE(fs_->write_file(root_ + "/bad_header.jsonl",
+                                "{\"type\":\"session\",\"version\":\"3\",\"id\":\"x\"}\n")
+                    .ok);
+    Result<JsonlSessionStorage, SessionError> storage;
+    EXPECT_NO_THROW(storage = JsonlSessionStorage::open(*fs_, root_ + "/bad_header.jsonl"));
+    EXPECT_FALSE(storage.ok);
+}
 
-    const auto user_id = session.append_message(Message::user("first"));
-    const auto label = session.append_label(user_id.value, "my label");
-    ASSERT_TRUE(label.ok);
-
-    const auto label_value = session.get_label(user_id.value);
-    ASSERT_TRUE(label_value.ok);
-    EXPECT_EQ(label_value.value.value_or(""), "my label");
-
-    // move_to 记录分支
-    const auto moved = session.move_to("", "branch summary");
-    ASSERT_TRUE(moved.ok);
-    const auto branch = session.get_branch();
-    ASSERT_TRUE(branch.ok);
-    // 最后是 branch_summary 条目
-    EXPECT_EQ(branch.value.back().type, SessionTreeEntry::Type::BranchSummary);
+TEST_F(SessionTest, RejectsTypeMismatchedEntryWithoutThrowing)
+{
+    ASSERT_TRUE(fs_->write_file(root_ + "/bad_entry.jsonl",
+                                "{\"type\":\"session\",\"version\":3,\"id\":\"s\","
+                                "\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n"
+                                "{\"type\":\"message\",\"id\":5,\"timestamp\":\"t\"}\n")
+                    .ok);
+    Result<JsonlSessionStorage, SessionError> storage;
+    EXPECT_NO_THROW(storage = JsonlSessionStorage::open(*fs_, root_ + "/bad_entry.jsonl"));
+    EXPECT_FALSE(storage.ok);
 }
 
 TEST_F(SessionTest, InvalidSessionFileRejected)
@@ -305,6 +304,31 @@ TEST_F(SessionTest, ListSessionsPopulatesPreviewAndMessageCount)
     EXPECT_GT(meta2->preview.size(), 80u);
     EXPECT_EQ(meta2->preview.substr(0, 80), std::string(80, 'x'));
     EXPECT_EQ(meta2->messageCount, 1);
+}
+
+TEST_F(SessionTest, ListSkipsImagePayloadWhenBuildingPreview)
+{
+    JsonlSessionRepo repo(*fs_, root_ + "/sessions");
+    const auto created = repo.create(root_);
+    ASSERT_TRUE(created.ok);
+    auto session = created.value;
+
+    Message image_message;
+    image_message.role = Role::User;
+    ContentBlock image;
+    image.type = BlockType::Image;
+    image.mimeType = "image/png";
+    image.data = std::string(100000, 'A');
+    image_message.content.push_back(image);
+    ASSERT_TRUE(session.append_message(image_message).ok);
+    ASSERT_TRUE(session.append_message(Message::user("after image")).ok);
+
+    const auto listed = repo.list(root_);
+    ASSERT_TRUE(listed.ok) << listed.error.message;
+    ASSERT_EQ(listed.value.size(), 1u);
+    // 图片消息只计数，不解析 base64；预览取第一条纯文本用户消息
+    EXPECT_EQ(listed.value[0].messageCount, 2);
+    EXPECT_EQ(listed.value[0].preview, "after image");
 }
 
 }  // namespace

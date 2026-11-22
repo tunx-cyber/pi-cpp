@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 
-#include "pi/ai/model_info.h"
 #include "pi/agent/agent.h"
+#include "pi/ai/model_info.h"
 #include "pi/harness/compaction.h"
 #include "pi/harness/session.h"
 #include "pi/harness/types.h"
@@ -25,11 +25,7 @@ struct AgentHarnessOptions
     std::shared_ptr<TransportAdapter> transport;
     std::function<std::optional<std::string>(const ModelInfo&)> getApiKey;
     ModelInfo model;
-    /** 单价覆盖（人民币元/M tokens），应用到所有解析出的模型。 */
-    PricingOverride pricing;
     ThinkingLevel thinkingLevel = ThinkingLevel::Off;
-    QueueMode steeringMode = QueueMode::OneAtATime;
-    QueueMode followUpMode = QueueMode::OneAtATime;
     CompactionSettings compactionSettings = default_compaction_settings();
 };
 
@@ -50,21 +46,17 @@ class AgentHarness
     void prompt(const std::string& text);
     void prompt_messages(const std::vector<AgentMessage>& messages);
     void steer(AgentMessage message);
-    void follow_up(AgentMessage message);
     void abort();
-    bool is_busy() const;
-    void wait_for_idle();
     void reset();
 
     void set_model(const ModelInfo& model);
     void set_thinking_level(ThinkingLevel level);
     void set_tools(std::vector<AgentTool> tools);
 
-    /** 手动压缩（/compact）：threshold 检查只发生在 maybe_auto_compact，此处总是执行。 */
+    /** 手动压缩（/compact）：不再有自动压缩，只有用户显式调用时才执行。 */
     bool compact(std::string* errorOut = nullptr);
 
     std::vector<AgentMessage> messages() const;
-    std::vector<AgentTool> tools() const;
     ModelInfo model() const;
     ThinkingLevel thinking_level() const;
     std::string system_prompt() const;
@@ -72,17 +64,10 @@ class AgentHarness
     const Session& session() const { return session_; }
 
     std::function<void()> subscribe(AgentEventListener listener);
-    /** 会话累计成本。run 线程（监听器）写、UI 线程读，由 cost_mutex_ 保护。 */
-    double total_cost() const
-    {
-        std::lock_guard<std::mutex> lock(cost_mutex_);
-        return total_cost_;
-    }
 
    private:
     std::string build_system_prompt() const;
     void persist_message(const AgentMessage& message);
-    void maybe_auto_compact();
     Result<std::string, CompactionError> run_compaction();
 
     Session session_;
@@ -94,12 +79,12 @@ class AgentHarness
     std::function<std::optional<std::string>(const ModelInfo&)> get_api_key_;
     ModelInfo model_;
     ThinkingLevel thinking_level_;
-    ModelInfo default_model_;             // 构造时确定，reload() 先恢复默认再按会话覆盖
-    PricingOverride pricing_;             // 单价覆盖，构造时确定
+    ModelInfo default_model_;  // 构造时确定，reload() 先恢复默认再按会话覆盖
     ThinkingLevel default_thinking_level_;
     CompactionSettings compaction_settings_;
-    mutable std::mutex cost_mutex_;  // 保护 total_cost_（跨线程读写）
-    double total_cost_ = 0;
+    /** 手动 /compact 的中止信号（abort() 同时设置它，使压缩可取消）。 */
+    mutable std::mutex compaction_mutex_;
+    std::shared_ptr<std::atomic<bool>> compaction_abort_;
 };
 
 }  // namespace pi

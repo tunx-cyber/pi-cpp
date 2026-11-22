@@ -40,6 +40,17 @@ std::string encode_cwd(const std::string& cwd)
 }
 
 /** 将首条用户消息折叠为单行预览（换行→空格、压缩空白、UTF-8 边界截断）。 */
+/** 取条目顶层的 type 字段（nlohmann 对象按 key 排序，type 总在行末，故取最后一个）。 */
+std::string entry_type_of(const std::string& line)
+{
+    const auto pos = line.rfind("\"type\":\"");
+    if (pos == std::string::npos) return "";
+    const auto start = pos + 8;  // strlen(""type":"")
+    const auto end = line.find('"', start);
+    if (end == std::string::npos) return "";
+    return line.substr(start, end - start);
+}
+
 std::string one_line_preview(const std::string& text)
 {
     std::string collapsed;
@@ -120,8 +131,7 @@ Result<std::string, SessionError> JsonlSessionRepo::create_session_file_path(
     return Result<std::string, SessionError>::ok_value(joined.value);
 }
 
-Result<Session, SessionError> JsonlSessionRepo::create(
-    const std::string& cwd, const std::optional<std::string>& parentSessionPath)
+Result<Session, SessionError> JsonlSessionRepo::create(const std::string& cwd)
 {
     const std::string id = uuidv7();
     const std::string createdAt = iso_timestamp();
@@ -138,8 +148,7 @@ Result<Session, SessionError> JsonlSessionRepo::create(
     if (!file_path.ok) return Result<Session, SessionError>::err_value(file_path.error);
     // 注意：storage 不能声明为 const，否则 std::move 得到 const 右值，
     // 无法绑定移动构造（拷贝构造已被禁用）。
-    auto storage =
-        JsonlSessionStorage::create(fs_, file_path.value, cwd, id, parentSessionPath.value_or(""));
+    auto storage = JsonlSessionStorage::create(fs_, file_path.value, cwd, id);
     if (!storage.ok) return Result<Session, SessionError>::err_value(storage.error);
     return Result<Session, SessionError>::ok_value(
         Session(std::make_shared<JsonlSessionStorage>(std::move(storage.value))));
@@ -222,23 +231,61 @@ Result<std::vector<SessionMetadata>, SessionError> JsonlSessionRepo::list(
         {
             if (file.kind == FileKind::Directory || file.name.size() < 6) continue;
             if (file.name.compare(file.name.size() - 6, 6, ".jsonl") != 0) continue;
-            const auto storage = JsonlSessionStorage::open(fs_, file.path);
-            if (!storage.ok) continue;  // 跳过损坏的会话
-            SessionMetadata metadata = storage.value.metadata();
-            // 计算预览（首个用户消息）与消息条数，供 /sessions 与 --resume 展示
-            const auto entries = storage.value.get_entries();
-            if (entries.ok)
-            {
-                for (const auto& entry : entries.value)
+
+            // 流式扫描：只解析 header + 首个用户消息，避免把整份会话（可能含 base64
+            // 图片）读入内存再构建完整 entry 列表。
+            SessionMetadata metadata;
+            metadata.path = file.path;
+            bool header_ok = false;
+            const auto scanned = fs_.for_each_line(
+                file.path,
+                [&](const std::string& raw)
                 {
-                    if (entry.type != SessionTreeEntry::Type::Message) continue;
-                    ++metadata.messageCount;
-                    if (metadata.preview.empty() && entry.message.role == Role::User)
+                    if (raw.empty()) return true;
+                    if (!header_ok)
                     {
-                        metadata.preview = one_line_preview(entry.message.text_content());
+                        try
+                        {
+                            const Json header = Json::parse(raw);
+                            if (!header.is_object() || header.value("type", "") != "session" ||
+                                header.value("version", 0) != 3)
+                                return false;
+                            metadata.id = header.value("id", "");
+                            metadata.createdAt = header.value("timestamp", "");
+                            metadata.cwd = header.value("cwd", "");
+                        }
+                        catch (...)
+                        {
+                            return false;  // 坏 header：跳过该会话
+                        }
+                        header_ok = true;
+                        return true;
                     }
-                }
-            }
+
+                    // 只读顶层 type 字段，不解析整行（图片行可能有 MB 级 base64）
+                    if (entry_type_of(raw) != "message") return true;
+                    ++metadata.messageCount;
+                    if (!metadata.preview.empty()) return true;
+                    // 只尝试解析用户消息；图片消息可能含大段 base64，直接跳过
+                    if (raw.find("\"role\":\"user\"") == std::string::npos) return true;
+                    if (raw.find("\"type\":\"image\"") != std::string::npos) return true;
+                    try
+                    {
+                        const Json entry = Json::parse(raw);
+                        if (!entry.contains("message") || !entry["message"].is_object())
+                            return true;
+                        const Message message = message_from_session_json(entry["message"]);
+                        if (message.role != Role::User) return true;
+                        const std::string text = message.text_content();
+                        if (!text.empty()) metadata.preview = one_line_preview(text);
+                    }
+                    catch (...)
+                    {
+                        // 单条坏消息不影响 /sessions 列表
+                    }
+                    return true;
+                });
+            if (!scanned.ok || !header_ok) continue;  // 跳过损坏的会话
             sessions.push_back(std::move(metadata));
         }
     }

@@ -26,11 +26,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 option(BUILD_TESTING "Build google test" ON)
-# 只有 macOS 的剪贴板实现需要 Objective-C++；Linux 构建不应强制依赖该编译器。
-if(APPLE)
-  enable_language(OBJCXX)
-endif()
-
 # 导出 compile_commands.json，供 IDE（VS Code C/C++ 扩展）跟随真实编译配置
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -64,6 +59,7 @@ set(PI_CORE_SOURCES
   src/ai/sse_parser.cpp
   src/ai/json_util.cpp
   src/ai/model_registry.cpp
+  src/ai/model_list.cpp
   src/ai/openai_mini.cpp
   src/ai/openai_transport.cpp
   src/ai/curl_http_client.cpp
@@ -101,6 +97,7 @@ add_executable(picpp
   src/app/commands.cpp
   src/app/repl.cpp
   src/app/repl_commands.cpp
+  src/app/conversation_format.cpp
   src/app/terminal_input.cpp
   src/app/agent_session.cpp
 )
@@ -110,11 +107,10 @@ target_include_directories(picpp SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thir
 if(BUILD_TESTING)
   # ============ pi_tests：单元测试 ============
   set(PI_TEST_SOURCES
-    tests/main.cpp
-    tests/ai/cost_test.cpp
     tests/ai/json_util_test.cpp
     tests/ai/sse_parser_test.cpp
     tests/ai/model_registry_test.cpp
+    tests/ai/model_list_test.cpp
     tests/ai/transport_test.cpp
     tests/ai/openai_mini_test.cpp
     tests/ai/curl_http_client_test.cpp
@@ -131,9 +127,16 @@ if(BUILD_TESTING)
     tests/app/settings_test.cpp
     tests/app/commands_test.cpp
     tests/app/memory_monitor_test.cpp
+    tests/app/usage_format_test.cpp
+    tests/app/selection_test.cpp
+    tests/app/theme_test.cpp
+    tests/app/conversation_format_test.cpp
+    tests/app/agent_session_test.cpp
     src/app/settings.cpp
     src/app/commands.cpp
     src/app/memory_monitor.cpp
+    src/app/agent_session.cpp
+    src/app/conversation_format.cpp
   )
 
   add_executable(pi_tests ${PI_TEST_SOURCES})

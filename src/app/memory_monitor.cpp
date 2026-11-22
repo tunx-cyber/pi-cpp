@@ -1,6 +1,7 @@
 #include "pi/app/memory_monitor.h"
 
 #include <charconv>
+
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -53,11 +54,6 @@ ProcessMemoryUsage parse_proc_status_memory(std::string_view status)
             usage.residentBytes = bytes;
             usage.hasResident = true;
         }
-        else if (!usage.hasVirtual && parse_kib_value(line, "VmSize:", &bytes))
-        {
-            usage.virtualBytes = bytes;
-            usage.hasVirtual = true;
-        }
 
         if (end == std::string_view::npos) break;
         start = end + 1;
@@ -76,8 +72,6 @@ ProcessMemoryUsage sample_process_memory()
 #elif defined(__APPLE__)
     // macOS 使用 task_vm_info 的 phys_footprint（与「活动监视器」的内存口径一致，
     // 包含压缩页；resident_size 只计未压缩的物理页）。
-    // virtual_size 含系统级稀疏映射（Apple Silicon 的 jumbo region 可达数百 GiB），
-    // 数值巨大但不代表实际占用，仅供对比。
     task_vm_info_data_t vm_info{};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm_info),
@@ -87,9 +81,7 @@ ProcessMemoryUsage sample_process_memory()
     }
     ProcessMemoryUsage usage;
     usage.residentBytes = static_cast<uint64_t>(vm_info.phys_footprint);
-    usage.virtualBytes = static_cast<uint64_t>(vm_info.virtual_size);
     usage.hasResident = true;
-    usage.hasVirtual = true;
     return usage;
 #else
     return {};
@@ -123,7 +115,6 @@ std::string format_memory_bytes(uint64_t bytes)
 std::string format_process_memory(const ProcessMemoryUsage& usage)
 {
     // 只展示进程实际占用的驻留内存（macOS phys_footprint / Linux VmRSS）。
-    // 不再展示 virtual_size：Apple Silicon 的稀疏映射可达数百 GiB，属正常现象而非实际占用。
     if (!usage.hasResident) return "unavailable";
     return format_memory_bytes(usage.residentBytes);
 }

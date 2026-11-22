@@ -14,13 +14,12 @@ namespace pi
 {
 namespace
 {
-// 自定义 HttpClient：abort 感知 + body augmenter（在 src 内实现 curl 部分）
+// 自定义 HttpClient：abort 感知（在 src 内实现 curl 部分）
 class AbortableHttpClient : public openai::HttpClient
 {
    public:
-    AbortableHttpClient(std::shared_ptr<std::atomic<bool>> abort,
-                        std::function<void(openai::json&)> augmenter)
-        : abort_(std::move(abort)), augmenter_(std::move(augmenter))
+    explicit AbortableHttpClient(std::shared_ptr<std::atomic<bool>> abort)
+        : abort_(std::move(abort))
     {
         static bool curl_initialized = []
         {
@@ -31,17 +30,7 @@ class AbortableHttpClient : public openai::HttpClient
         (void)curl_initialized;
     }
 
-    openai::HttpResponse request(const openai::HttpRequest& req) override
-    {
-        openai::HttpRequest request = req;
-        if (augmenter_ && !request.body.empty())
-        {
-            openai::json body = openai::json::parse(request.body);
-            augmenter_(body);
-            request.body = body.dump();
-        }
-        return do_curl(request);
-    }
+    openai::HttpResponse request(const openai::HttpRequest& req) override { return do_curl(req); }
 
    private:
     struct RequestState
@@ -213,21 +202,25 @@ class AbortableHttpClient : public openai::HttpClient
         openai::HttpResponse response;
         response.status_code = state.status;
         response.headers = std::move(state.headers);
-        // 流式模式下 collect_body=false：错误响应体仍保留，成功响应体为空
-        response.body =
-            request.collect_body ? std::move(response_body) : std::move(state.error_body);
+        // 错误响应体在 status>=400 时单独收集：非流式请求也必须保留，供上层解析错误信息。
+        if (request.collect_body && state.status < 400)
+        {
+            response.body = std::move(response_body);
+        }
+        else
+        {
+            response.body = std::move(state.error_body);
+        }
         return response;
     }
 
     std::shared_ptr<std::atomic<bool>> abort_;
-    std::function<void(openai::json&)> augmenter_;
 };
 
 }  // namespace
 
-std::unique_ptr<openai::HttpClient> make_curl_http_client(
-    std::shared_ptr<std::atomic<bool>> abort, std::function<void(openai::json&)> augmenter)
+std::unique_ptr<openai::HttpClient> make_curl_http_client(std::shared_ptr<std::atomic<bool>> abort)
 {
-    return std::make_unique<AbortableHttpClient>(std::move(abort), std::move(augmenter));
+    return std::make_unique<AbortableHttpClient>(std::move(abort));
 }
 }  // namespace pi

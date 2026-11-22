@@ -15,21 +15,27 @@ namespace pi
 /** ~/.pi-cpp/settings.json（模型/thinking 按 cwd 持久化）。 */
 struct Settings
 {
-    std::string apiKey;  // 优先级低于 env DEEPSEEK_API_KEY / PI_API_KEY
+    /** 仅从 env 解析（PI_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY），不读 settings.json。 */
+    std::string apiKey;
+    /** 代码默认端点；可用 env PI_BASE_URL 覆盖，不读 settings.json。 */
     std::string baseUrl = "https://api.deepseek.com";
-    std::string model = "deepseek-v4-flash";
+    /**
+     * 当前模型 id；空表示"未指定"——运行时由端点 `GET /models` 返回的第一个模型确定，
+     * 不在代码里写死任何默认模型。可由 PI_MODEL / settings.json / byCwd 显式指定。
+     */
+    std::string model;
     ThinkingLevel thinking = ThinkingLevel::Off;
     std::string sessionsRoot = "~/.pi-cpp/agent/sessions";
     /** 系统提示词 base（settings.json 的 systemPrompt 键）。 */
     std::string systemPrompt = "You are pi-cpp, a helpful coding assistant in a terminal.";
-    /** 单价覆盖（人民币元/M tokens），来自 settings.json 的 costInput/costOutput/... 键。 */
-    PricingOverride pricing;
     /** settings.json 的 models 数组定义的自定义模型（可覆盖内置模型）。 */
     std::vector<ModelInfo> models;
     /** 自动压缩参数（settings.json 的 compaction 对象）。 */
     CompactionSettings compaction;
     /** web_search 参数（settings.json 的 webSearch 对象）。 */
     WebSearchConfig webSearch;
+    /** 终端主题（settings.json 的 theme 键，默认 default；预留自定义）。 */
+    std::string theme = "default";
 
     /** 按 cwd 覆盖（模型选择跨重启保留）。 */
     struct CwdOverride

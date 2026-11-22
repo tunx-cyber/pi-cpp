@@ -142,8 +142,6 @@ inline pi::ModelInfo scripted_model()
     model.api = "openai-completions";
     model.provider = "scripted";
     model.baseUrl = "http://localhost";
-    model.costInput = 1;
-    model.costOutput = 2;
     return model;
 }
 

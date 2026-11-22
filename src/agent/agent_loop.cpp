@@ -89,10 +89,7 @@ void emit_tool_result_message(const Message& message, const AgentEventSink& emit
     emit(end);
 }
 
-/**
- * 工具调用准备（preflight）：查工具、prepareArguments、schema 校验、beforeToolCall 钩子。
- * 失败/拦截返回 immediate outcome。
- */
+/** 工具调用准备（preflight）：查工具 + schema 校验。失败返回 immediate outcome。 */
 struct PreparationResult
 {
     bool immediate = false;
@@ -101,9 +98,7 @@ struct PreparationResult
     PreparedToolCall prepared;
 };
 
-PreparationResult prepare_tool_call(const AgentContext& context,
-                                    const AgentMessage& assistant_message,
-                                    const ContentBlock& tool_call, AgentLoopConfig& config,
+PreparationResult prepare_tool_call(const AgentContext& context, const ContentBlock& tool_call,
                                     const std::shared_ptr<std::atomic<bool>>& signal)
 {
     const AgentTool* tool = nullptr;
@@ -123,37 +118,10 @@ PreparationResult prepare_tool_call(const AgentContext& context,
     try
     {
         PreparedToolCall prepared{&tool_call, tool, tool_call.arguments};
-        if (tool->prepareArguments)
-        {
-            Json prepared_args = tool->prepareArguments(tool_call.arguments);
-            if (prepared_args.is_object()) prepared.args = std::move(prepared_args);
-        }
         const auto validation_error = validate_tool_args(*tool, prepared.args);
         if (validation_error)
         {
             return {true, create_error_tool_result(*validation_error), true, {}};
-        }
-        if (config.beforeToolCall)
-        {
-            BeforeToolCallContext hook_context;
-            hook_context.assistantMessage = &assistant_message;
-            hook_context.toolCall = &tool_call;
-            hook_context.args = prepared.args;
-            hook_context.context = &context;
-            const auto before_result = config.beforeToolCall(hook_context, signal);
-            if (signal && signal->load())
-            {
-                return {true, create_error_tool_result("Operation aborted"), true, {}};
-            }
-            if (before_result.block)
-            {
-                return {true,
-                        create_error_tool_result(before_result.reason.empty()
-                                                     ? "Tool execution was blocked"
-                                                     : before_result.reason),
-                        true,
-                        {}};
-            }
         }
         if (signal && signal->load())
         {
@@ -165,37 +133,6 @@ PreparationResult prepare_tool_call(const AgentContext& context,
     {
         return {true, create_error_tool_result(e.what()), true, {}};
     }
-}
-
-FinalizedToolCallOutcome finalize_executed_tool_call(
-    const AgentContext& context, const AgentMessage& assistant_message,
-    const PreparedToolCall& prepared, const FinalizedToolCallOutcome& executed,
-    AgentLoopConfig& config, const std::shared_ptr<std::atomic<bool>>& signal)
-{
-    FinalizedToolCallOutcome outcome = executed;
-    if (!config.afterToolCall) return outcome;
-
-    try
-    {
-        AfterToolCallContext hook_context;
-        hook_context.assistantMessage = &assistant_message;
-        hook_context.toolCall = prepared.toolCall;
-        hook_context.args = prepared.args;
-        hook_context.result = outcome.result;
-        hook_context.isError = outcome.isError;
-        hook_context.context = &context;
-        const auto after = config.afterToolCall(hook_context, signal);
-        if (after.content) outcome.result.content = *after.content;
-        if (after.details) outcome.result.details = *after.details;
-        if (after.isError) outcome.isError = *after.isError;
-        if (after.terminate) outcome.result.terminate = *after.terminate;
-    }
-    catch (const std::exception& e)
-    {
-        outcome.result = create_error_tool_result(e.what());
-        outcome.isError = true;
-    }
-    return outcome;
 }
 
 struct ExecutedToolBatch
@@ -237,8 +174,7 @@ ExecutedToolBatch execute_tool_calls_sequential(AgentContext& context,
         start.args = tool_call.arguments;
         emit(start);
 
-        const auto preparation =
-            prepare_tool_call(context, assistant_message, tool_call, config, signal);
+        const auto preparation = prepare_tool_call(context, tool_call, signal);
         FinalizedToolCallOutcome finalized;
         if (preparation.immediate)
         {
@@ -252,19 +188,8 @@ ExecutedToolBatch execute_tool_calls_sequential(AgentContext& context,
             executed_outcome.toolCall = &tool_call;
             try
             {
-                const ToolResult executed = preparation.prepared.tool->execute(
-                    tool_call.id, preparation.prepared.args, signal,
-                    [&](const ToolResult& partial)
-                    {
-                        AgentEvent update;
-                        update.type = AgentEvent::Type::ToolExecutionUpdate;
-                        update.toolCallId = tool_call.id;
-                        update.toolName = tool_call.name;
-                        update.args = tool_call.arguments;
-                        update.partialResult = partial;
-                        emit(update);
-                    });
-                executed_outcome.result = executed;
+                executed_outcome.result = preparation.prepared.tool->execute(
+                    tool_call.id, preparation.prepared.args, signal);
                 executed_outcome.isError = false;
             }
             catch (const std::exception& e)
@@ -274,8 +199,7 @@ ExecutedToolBatch execute_tool_calls_sequential(AgentContext& context,
                 executed_outcome.result = create_error_tool_result(e.what());
                 executed_outcome.isError = true;
             }
-            finalized = finalize_executed_tool_call(
-                context, assistant_message, preparation.prepared, executed_outcome, config, signal);
+            finalized = executed_outcome;
         }
 
         AgentEvent end;
@@ -321,8 +245,7 @@ ExecutedToolBatch execute_tool_calls_parallel(AgentContext& context,
         start.args = tool_call.arguments;
         emit(start);
 
-        const auto preparation =
-            prepare_tool_call(context, assistant_message, tool_call, config, signal);
+        const auto preparation = prepare_tool_call(context, tool_call, signal);
         Entry entry;
         if (preparation.immediate)
         {
@@ -341,7 +264,6 @@ ExecutedToolBatch execute_tool_calls_parallel(AgentContext& context,
 
     // Workers execute tools only. Hooks and event dispatch stay on the run thread.
     std::vector<FinalizedToolCallOutcome> results(entries.size());
-    std::vector<std::vector<ToolResult>> updates(entries.size());
     std::vector<size_t> completion_order;
     completion_order.reserve(entries.size());
     std::mutex completion_mutex;
@@ -375,12 +297,7 @@ ExecutedToolBatch execute_tool_calls_parallel(AgentContext& context,
                         else
                         {
                             executed.result = entries[i].prepared.tool->execute(
-                                executed.toolCall->id, entries[i].prepared.args, signal,
-                                [&, i](const ToolResult& partial)
-                                {
-                                    std::lock_guard<std::mutex> lock(completion_mutex);
-                                    updates[i].push_back(partial);
-                                });
+                                executed.toolCall->id, entries[i].prepared.args, signal);
                         }
                     }
                     catch (const std::exception& error)
@@ -431,20 +348,6 @@ ExecutedToolBatch execute_tool_calls_parallel(AgentContext& context,
     // R1 按完成序先发收集到的流式更新，再发 tool_execution_end
     for (size_t index : completion_order)
     {
-        if (!entries[index].immediate)
-            results[index] =
-                finalize_executed_tool_call(context, assistant_message, entries[index].prepared,
-                                            results[index], config, signal);
-        for (const auto& partial : updates[index])
-        {
-            AgentEvent update;
-            update.type = AgentEvent::Type::ToolExecutionUpdate;
-            update.toolCallId = results[index].toolCall->id;
-            update.toolName = results[index].toolCall->name;
-            update.args = results[index].toolCall->arguments;
-            update.partialResult = partial;
-            emit(update);
-        }
         const auto& outcome = results[index];
         AgentEvent end;
         end.type = AgentEvent::Type::ToolExecutionEnd;
@@ -473,8 +376,7 @@ ExecutedToolBatch execute_tool_calls(AgentContext& context, const AgentMessage& 
                                      AgentLoopConfig& config, const AgentEventSink& emit,
                                      const std::shared_ptr<std::atomic<bool>>& signal)
 {
-    const bool sequential = config.toolExecution == ToolExecutionMode::Sequential ||
-                            has_sequential_tool_call(tool_calls, context);
+    const bool sequential = has_sequential_tool_call(tool_calls, context);
     if (sequential)
     {
         return execute_tool_calls_sequential(context, assistant_message, tool_calls, config, emit,
@@ -510,34 +412,8 @@ Message stream_assistant_response(AgentContext& context, AgentLoopConfig& config
         return failure;
     }
 
-    std::vector<AgentMessage> messages = context.messages;
-    if (config.transformContext)
-    {
-        try
-        {
-            messages = config.transformContext(messages, signal);
-        }
-        catch (...)
-        {
-        }
-    }
-
-    std::vector<AgentMessage> llm_messages;
-    if (config.convertToLlm)
-    {
-        try
-        {
-            llm_messages = config.convertToLlm(messages);
-        }
-        catch (...)
-        {
-            llm_messages = default_convert_to_llm(messages);
-        }
-    }
-    else
-    {
-        llm_messages = default_convert_to_llm(messages);
-    }
+    // Role 只有 user/assistant/toolResult 三种，无需再过滤拷贝：直接引用 context
+    const std::vector<AgentMessage>& llm_messages = context.messages;
 
     std::optional<std::string> api_key;
     if (config.getApiKey)
@@ -571,75 +447,85 @@ Message stream_assistant_response(AgentContext& context, AgentLoopConfig& config
     bool added_partial = false;
     bool message_done = false;
 
-    config.transport->stream_chat(config.model, llm_messages, opts,
-                                  [&](const StreamEvent& event)
-                                  {
-                                      switch (event.type)
-                                      {
-                                          case StreamEvent::Type::Start:
-                                              final_message = event.message;
-                                              context.messages.push_back(final_message);
-                                              added_partial = true;
-                                              {
-                                                  AgentEvent agent_event;
-                                                  agent_event.type = AgentEvent::Type::MessageStart;
-                                                  agent_event.message = final_message;
-                                                  emit(agent_event);
-                                              }
-                                              break;
+    config.transport->stream_chat(
+        config.model, llm_messages, opts,
+        [&](const StreamEvent& event)
+        {
+            switch (event.type)
+            {
+                case StreamEvent::Type::Start:
+                    final_message = event.message;
+                    context.messages.push_back(final_message);
+                    added_partial = true;
+                    {
+                        AgentEvent agent_event;
+                        agent_event.type = AgentEvent::Type::MessageStart;
+                        agent_event.message = final_message;
+                        emit(agent_event);
+                    }
+                    break;
 
-                                          case StreamEvent::Type::TextStart:
-                                          case StreamEvent::Type::TextDelta:
-                                          case StreamEvent::Type::TextEnd:
-                                          case StreamEvent::Type::ThinkingStart:
-                                          case StreamEvent::Type::ThinkingDelta:
-                                          case StreamEvent::Type::ThinkingEnd:
-                                          case StreamEvent::Type::ToolCallStart:
-                                          case StreamEvent::Type::ToolCallDelta:
-                                          case StreamEvent::Type::ToolCallEnd:
-                                              if (added_partial)
-                                              {
-                                                  final_message = event.message;
-                                                  if (!context.messages.empty())
-                                                      context.messages.back() = final_message;
-                                                  AgentEvent agent_event;
-                                                  agent_event.type =
-                                                      AgentEvent::Type::MessageUpdate;
-                                                  agent_event.message = final_message;
-                                                  agent_event.assistantMessageEvent = event;
-                                                  emit(agent_event);
-                                              }
-                                              break;
+                case StreamEvent::Type::TextStart:
+                case StreamEvent::Type::TextEnd:
+                case StreamEvent::Type::ThinkingStart:
+                case StreamEvent::Type::ThinkingEnd:
+                case StreamEvent::Type::ToolCallStart:
+                case StreamEvent::Type::ToolCallEnd:
+                    // 块边界事件携带完整部分消息：同步到 transcript
+                    if (added_partial)
+                    {
+                        final_message = event.message;
+                        if (!context.messages.empty()) context.messages.back() = final_message;
+                        AgentEvent agent_event;
+                        agent_event.type = AgentEvent::Type::MessageUpdate;
+                        agent_event.message = final_message;
+                        agent_event.assistantMessageEvent = event;
+                        emit(agent_event);
+                    }
+                    break;
 
-                                          case StreamEvent::Type::Done:
-                                          case StreamEvent::Type::Error:
-                                              final_message = event.message;
-                                              if (added_partial)
-                                              {
-                                                  if (!context.messages.empty())
-                                                      context.messages.back() = final_message;
-                                              }
-                                              else
-                                              {
-                                                  context.messages.push_back(final_message);
-                                              }
-                                              if (!added_partial)
-                                              {
-                                                  AgentEvent agent_event;
-                                                  agent_event.type = AgentEvent::Type::MessageStart;
-                                                  agent_event.message = final_message;
-                                                  emit(agent_event);
-                                              }
-                                              {
-                                                  AgentEvent agent_event;
-                                                  agent_event.type = AgentEvent::Type::MessageEnd;
-                                                  agent_event.message = final_message;
-                                                  emit(agent_event);
-                                              }
-                                              message_done = true;
-                                              break;
-                                      }
-                                  });
+                case StreamEvent::Type::TextDelta:
+                case StreamEvent::Type::ThinkingDelta:
+                case StreamEvent::Type::ToolCallDelta:
+                    // delta 不带整条 message（否则每个 token 复制一次
+                    // 已累积的回复，O(n²)）：只把增量透传给 UI。
+                    if (added_partial)
+                    {
+                        AgentEvent agent_event;
+                        agent_event.type = AgentEvent::Type::MessageUpdate;
+                        agent_event.assistantMessageEvent = event;
+                        emit(agent_event);
+                    }
+                    break;
+
+                case StreamEvent::Type::Done:
+                case StreamEvent::Type::Error:
+                    final_message = event.message;
+                    if (added_partial)
+                    {
+                        if (!context.messages.empty()) context.messages.back() = final_message;
+                    }
+                    else
+                    {
+                        context.messages.push_back(final_message);
+                    }
+                    if (!added_partial)
+                    {
+                        AgentEvent agent_event;
+                        agent_event.type = AgentEvent::Type::MessageStart;
+                        agent_event.message = final_message;
+                        emit(agent_event);
+                    }
+                    {
+                        AgentEvent agent_event;
+                        agent_event.type = AgentEvent::Type::MessageEnd;
+                        agent_event.message = final_message;
+                        emit(agent_event);
+                    }
+                    message_done = true;
+                    break;
+            }
+        });
 
     if (!message_done)
     {
@@ -722,11 +608,9 @@ void run_loop(AgentContext& current_context, std::vector<AgentMessage>& new_mess
                 AgentEvent turn_end;
                 turn_end.type = AgentEvent::Type::TurnEnd;
                 turn_end.message = message;
-                turn_end.toolResults = {};
                 emit(turn_end);
                 AgentEvent agent_end;
                 agent_end.type = AgentEvent::Type::AgentEnd;
-                agent_end.messages = new_messages;
                 emit(agent_end);
                 return;
             }
@@ -755,33 +639,7 @@ void run_loop(AgentContext& current_context, std::vector<AgentMessage>& new_mess
             AgentEvent turn_end;
             turn_end.type = AgentEvent::Type::TurnEnd;
             turn_end.message = message;
-            turn_end.toolResults = tool_results;
             emit(turn_end);
-
-            if (config.prepareNextTurn)
-            {
-                ShouldStopAfterTurnContext next_turn_context;
-                next_turn_context.message = &message;
-                next_turn_context.toolResults = &tool_results;
-                next_turn_context.context = &current_context;
-                next_turn_context.newMessages = &new_messages;
-                try
-                {
-                    const auto update = config.prepareNextTurn(next_turn_context);
-                    if (update.context) current_context = *update.context;
-                    if (update.model) config.model = *update.model;
-                    if (update.thinkingLevel)
-                    {
-                        config.reasoning =
-                            *update.thinkingLevel == ThinkingLevel::Off
-                                ? std::optional<ThinkingLevel>(std::nullopt)
-                                : std::optional<ThinkingLevel>(*update.thinkingLevel);
-                    }
-                }
-                catch (...)
-                {
-                }
-            }
 
             if (config.shouldStopAfterTurn)
             {
@@ -802,7 +660,6 @@ void run_loop(AgentContext& current_context, std::vector<AgentMessage>& new_mess
                 {
                     AgentEvent agent_end;
                     agent_end.type = AgentEvent::Type::AgentEnd;
-                    agent_end.messages = new_messages;
                     emit(agent_end);
                     return;
                 }
@@ -820,48 +677,15 @@ void run_loop(AgentContext& current_context, std::vector<AgentMessage>& new_mess
                 }
             }
         }
-
-        // agent 本应停止；检查 follow-up 队列
-        std::vector<AgentMessage> follow_up_messages;
-        if (config.getFollowUpMessages)
-        {
-            try
-            {
-                follow_up_messages = config.getFollowUpMessages();
-            }
-            catch (...)
-            {
-            }
-        }
-        if (!follow_up_messages.empty())
-        {
-            pending_messages = std::move(follow_up_messages);
-            continue;
-        }
         break;
     }
 
     AgentEvent agent_end;
     agent_end.type = AgentEvent::Type::AgentEnd;
-    agent_end.messages = new_messages;
     emit(agent_end);
 }
 
 }  // namespace
-
-std::vector<AgentMessage> default_convert_to_llm(const std::vector<AgentMessage>& messages)
-{
-    std::vector<AgentMessage> out;
-    for (const auto& message : messages)
-    {
-        if (message.role == Role::User || message.role == Role::Assistant ||
-            message.role == Role::ToolResult)
-        {
-            out.push_back(message);
-        }
-    }
-    return out;
-}
 
 std::vector<AgentMessage> run_agent_loop(const std::vector<AgentMessage>& prompts,
                                          AgentContext& context, AgentLoopConfig& config,
@@ -891,23 +715,6 @@ std::vector<AgentMessage> run_agent_loop(const std::vector<AgentMessage>& prompt
         end.message = prompt;
         emit(end);
     }
-
-    run_loop(context, new_messages, config, signal, emit);
-    return new_messages;
-}
-
-std::vector<AgentMessage> run_agent_loop_continue(AgentContext& context, AgentLoopConfig& config,
-                                                  const AgentEventSink& emit,
-                                                  const std::shared_ptr<std::atomic<bool>>& signal)
-{
-    std::vector<AgentMessage> new_messages;
-
-    AgentEvent agent_start;
-    agent_start.type = AgentEvent::Type::AgentStart;
-    emit(agent_start);
-    AgentEvent turn_start;
-    turn_start.type = AgentEvent::Type::TurnStart;
-    emit(turn_start);
 
     run_loop(context, new_messages, config, signal, emit);
     return new_messages;

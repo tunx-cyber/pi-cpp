@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 namespace pi
 {
 namespace
@@ -19,7 +21,8 @@ TEST(ModelRegistryTest, HasDeepseekModels)
 
     const auto pro = get_model("deepseek-v4-pro");
     ASSERT_TRUE(pro.has_value());
-    EXPECT_GT(pro->costOutput, flash->costOutput);
+    EXPECT_EQ(pro->provider, flash->provider);
+    EXPECT_TRUE(pro->reasoning);
 }
 
 TEST(ModelRegistryTest, UnknownModelReturnsNullopt)
@@ -45,37 +48,39 @@ TEST(ModelRegistryTest, RegisterOverrideTakesPrecedence)
     register_model(*builtin);  // 恢复内置模型，避免污染后续测试
 }
 
-TEST(ModelRegistryTest, SupportedThinkingLevelsDeepseek)
+TEST(ModelRegistryTest, InfersFamilyTemplateFromModelId)
 {
-    const auto model = get_model("deepseek-v4-flash");
+    // GET /models 只返回 id：deepseek-flash 应继承 deepseek 家族的能力（含思考支持）
+    const auto model = find_model_template("deepseek-flash", "https://proxy.example/v1");
     ASSERT_TRUE(model.has_value());
-    const auto levels = get_supported_thinking_levels(*model);
-    // minimal/low/medium 显式 null → 不支持；xhigh 有映射 → 支持
-    ASSERT_EQ(levels.size(), 3u);
-    EXPECT_EQ(levels[0], ThinkingLevel::Off);
-    EXPECT_EQ(levels[1], ThinkingLevel::High);
-    EXPECT_EQ(levels[2], ThinkingLevel::Xhigh);
+    EXPECT_EQ(model->provider, "deepseek");
+    EXPECT_TRUE(model->reasoning);
+    EXPECT_EQ(model->contextWindow, 1000000);
+    // thinking 映射随家族继承（high→"high"、xhigh→"max"），但不再做"支持与否"判定
+    ASSERT_TRUE(model->thinkingLevelMap.count(ThinkingLevel::High) > 0);
+    EXPECT_EQ(model->thinkingLevelMap.at(ThinkingLevel::High), std::optional<std::string>("high"));
 }
 
-TEST(ModelRegistryTest, ClampThinkingLevelDeepseek)
+TEST(ModelRegistryTest, InfersFamilyTemplateFromEndpointHost)
 {
-    const auto model = get_model("deepseek-v4-flash");
+    // id 看不出家族时，按端点 host 推断（同一个服务商共享能力）
+    const auto model = find_model_template("my-endpoint-model", "https://api.deepseek.com/v1");
     ASSERT_TRUE(model.has_value());
-    EXPECT_EQ(clamp_thinking_level(*model, ThinkingLevel::Medium), ThinkingLevel::High);
-    EXPECT_EQ(clamp_thinking_level(*model, ThinkingLevel::High), ThinkingLevel::High);
-    EXPECT_EQ(clamp_thinking_level(*model, ThinkingLevel::Xhigh), ThinkingLevel::Xhigh);
-    // minimal 不支持 → 向上取高 → high
-    EXPECT_EQ(clamp_thinking_level(*model, ThinkingLevel::Minimal), ThinkingLevel::High);
+    EXPECT_EQ(model->provider, "deepseek");
 }
 
-TEST(ModelRegistryTest, NonReasoningModelOnlyOff)
+TEST(ModelRegistryTest, PrefersClosestFamilyMember)
 {
-    ModelInfo model;
-    model.id = "plain";
-    model.reasoning = false;
-    const auto levels = get_supported_thinking_levels(model);
-    ASSERT_EQ(levels.size(), 1u);
-    EXPECT_EQ(levels[0], ThinkingLevel::Off);
+    const auto model = find_model_template("deepseek-v4-pro-2025", "https://proxy.example/v1");
+    ASSERT_TRUE(model.has_value());
+    EXPECT_EQ(model->id, "deepseek-v4-pro");
+}
+
+TEST(ModelRegistryTest, UnknownFamilyHasNoTemplate)
+{
+    EXPECT_FALSE(find_model_template("qwen2.5-coder", "http://localhost:11434/v1").has_value());
+    // 只共享字母前缀不算同一家族（缺分隔符）
+    EXPECT_FALSE(find_model_template("deepseekxyz", "http://localhost:11434/v1").has_value());
 }
 
 TEST(ModelRegistryTest, ModelsAreEqual)

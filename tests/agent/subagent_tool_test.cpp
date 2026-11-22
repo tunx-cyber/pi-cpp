@@ -25,7 +25,7 @@ TEST(SubagentToolTest, RunsSubagentAndWrapsResult)
     const AgentTool tool = make_subagent_tool(options);
 
     const auto result = tool.execute("call_1", Json{{"prompt", "do the thing"}},
-                                     std::make_shared<std::atomic<bool>>(false), nullptr);
+                                     std::make_shared<std::atomic<bool>>(false));
     ASSERT_FALSE(result.content.empty());
     const std::string text = result.content[0].text;
     EXPECT_NE(text.find("<subagent>"), std::string::npos);
@@ -49,7 +49,7 @@ TEST(SubagentToolTest, NestedSubagentToolAvailable)
     AgentTool inner = tool;
     // 直接执行时无法看到内部工具；验证递归执行一层
     const auto result = tool.execute("call_1", Json{{"prompt", "nested"}},
-                                     std::make_shared<std::atomic<bool>>(false), nullptr);
+                                     std::make_shared<std::atomic<bool>>(false));
     ASSERT_FALSE(result.content.empty());
     EXPECT_NE(result.content[0].text.find("outer answer"), std::string::npos);
     (void)executed;
@@ -62,10 +62,8 @@ TEST(SubagentToolTest, MaxTurnsProtection)
     AgentTool looping_tool;
     looping_tool.name = "loop";
     looping_tool.description = "loops";
-    looping_tool.label = "loop";
     looping_tool.execute = [](const std::string&, const Json&,
-                              const std::shared_ptr<std::atomic<bool>>&,
-                              const std::function<void(const ToolResult&)>&) -> ToolResult
+                              const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     {
         ToolResult result;
         result.content.push_back(pi_test::text_block("loop again"));
@@ -86,7 +84,7 @@ TEST(SubagentToolTest, MaxTurnsProtection)
     const AgentTool tool = make_subagent_tool(options);
 
     const auto result = tool.execute("call_1", Json{{"prompt", "loop forever"}},
-                                     std::make_shared<std::atomic<bool>>(false), nullptr);
+                                     std::make_shared<std::atomic<bool>>(false));
     ASSERT_FALSE(result.content.empty());
     // 轮次超限 → 返回错误
     EXPECT_NE(result.content[0].text.find("max turns exceeded"), std::string::npos);
@@ -96,17 +94,15 @@ TEST(SubagentToolTest, MaxTurnsWithCleanFinalAnswerReturnsResult)
 {
     // 恰好跑满 maxTurns 但最后一轮给出干净的最终回答 → 不应误报 "max turns exceeded"
     auto transport = std::make_shared<pi_test::ScriptedTransport>();
-    transport->add_turn(pi_test::tool_turn(
-        {pi_test::tool_call_block("c1", "loop", Json{{"x", 1}})}));
+    transport->add_turn(
+        pi_test::tool_turn({pi_test::tool_call_block("c1", "loop", Json{{"x", 1}})}));
     transport->add_turn(pi_test::text_turn("final answer"));
 
     AgentTool looping_tool;
     looping_tool.name = "loop";
     looping_tool.description = "loops";
-    looping_tool.label = "loop";
     looping_tool.execute = [](const std::string&, const Json&,
-                              const std::shared_ptr<std::atomic<bool>>&,
-                              const std::function<void(const ToolResult&)>&) -> ToolResult
+                              const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     {
         ToolResult result;
         result.content.push_back(pi_test::text_block("loop again"));
@@ -122,7 +118,7 @@ TEST(SubagentToolTest, MaxTurnsWithCleanFinalAnswerReturnsResult)
     const AgentTool tool = make_subagent_tool(options);
 
     const auto result = tool.execute("call_1", Json{{"prompt", "loop then answer"}},
-                                     std::make_shared<std::atomic<bool>>(false), nullptr);
+                                     std::make_shared<std::atomic<bool>>(false));
     ASSERT_FALSE(result.content.empty());
     const std::string text = result.content[0].text;
     EXPECT_NE(text.find("<subagent>"), std::string::npos);
@@ -145,37 +141,10 @@ TEST(SubagentToolTest, MaxNestingDepthProtection)
     const AgentTool tool = make_subagent_tool(options);
 
     const auto result = tool.execute("call_1", Json{{"prompt", "start"}},
-                                     std::make_shared<std::atomic<bool>>(false), nullptr);
+                                     std::make_shared<std::atomic<bool>>(false));
     // depth 1 > max 0 → 错误
     ASSERT_FALSE(result.content.empty());
     EXPECT_NE(result.content[0].text.find("max nesting depth exceeded"), std::string::npos);
-}
-
-TEST(SubagentToolTest, ForwardsStreamingUpdates)
-{
-    auto transport = std::make_shared<pi_test::ScriptedTransport>();
-    transport->add_turn(pi_test::text_turn("streamed content"));
-
-    SubagentToolOptions options;
-    options.model = pi_test::scripted_model();
-    options.transport = transport;
-    options.systemPrompt = "subagent";
-    const AgentTool tool = make_subagent_tool(options);
-
-    std::string forwarded;
-    const auto result = tool.execute("call_1", Json{{"prompt", "tell me"}},
-                                     std::make_shared<std::atomic<bool>>(false),
-                                     [&forwarded](const ToolResult& partial)
-                                     {
-                                         for (const auto& block : partial.content)
-                                         {
-                                             if (block.type == BlockType::Text)
-                                                 forwarded += block.text;
-                                         }
-                                     });
-    (void)result;
-    // 子 agent 的流式文本被转发为 tool_execution_update
-    EXPECT_NE(forwarded.find("streamed content"), std::string::npos);
 }
 
 TEST(SubagentToolTest, AbortPropagatesToSubagent)
@@ -193,7 +162,7 @@ TEST(SubagentToolTest, AbortPropagatesToSubagent)
     auto abort = std::make_shared<std::atomic<bool>>(false);
     // 立即 abort：子 agent 启动后会被中断
     abort->store(true);
-    const auto result = tool.execute("call_1", Json{{"prompt", "quick"}}, abort, nullptr);
+    const auto result = tool.execute("call_1", Json{{"prompt", "quick"}}, abort);
     ASSERT_FALSE(result.content.empty());
     // abort 后子 agent 不产生正常 <subagent> 结果（错误或空）
     EXPECT_EQ(result.content[0].text.find("<subagent>"), std::string::npos);

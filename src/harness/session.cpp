@@ -131,12 +131,7 @@ Json message_to_session_json(const Message& message)
                              {"output", message.usage.output},
                              {"cacheRead", message.usage.cacheRead},
                              {"cacheWrite", message.usage.cacheWrite},
-                             {"totalTokens", message.usage.totalTokens},
-                             {"cost", Json{{"input", message.usage.cost.input},
-                                           {"output", message.usage.cost.output},
-                                           {"cacheRead", message.usage.cost.cacheRead},
-                                           {"cacheWrite", message.usage.cost.cacheWrite},
-                                           {"total", message.usage.cost.total}}}};
+                             {"totalTokens", message.usage.totalTokens}};
         json["stopReason"] = to_string(message.stopReason);
         if (!message.errorMessage.empty()) json["errorMessage"] = message.errorMessage;
     }
@@ -231,24 +226,6 @@ Json session_entry_to_json(const SessionTreeEntry& entry)
         case SessionTreeEntry::Type::Compaction:
             type = "compaction";
             break;
-        case SessionTreeEntry::Type::BranchSummary:
-            type = "branch_summary";
-            break;
-        case SessionTreeEntry::Type::Custom:
-            type = "custom";
-            break;
-        case SessionTreeEntry::Type::CustomMessage:
-            type = "custom_message";
-            break;
-        case SessionTreeEntry::Type::Label:
-            type = "label";
-            break;
-        case SessionTreeEntry::Type::SessionInfo:
-            type = "session_info";
-            break;
-        case SessionTreeEntry::Type::Leaf:
-            type = "leaf";
-            break;
     }
     json["type"] = type;
     json["id"] = entry.id;
@@ -277,35 +254,6 @@ Json session_entry_to_json(const SessionTreeEntry& entry)
             if (entry.details.is_object() && !entry.details.empty())
                 json["details"] = entry.details;
             if (entry.fromHook) json["fromHook"] = true;
-            break;
-        case SessionTreeEntry::Type::BranchSummary:
-            json["fromId"] = entry.fromId;
-            json["summary"] = entry.summary;
-            if (entry.details.is_object() && !entry.details.empty())
-                json["details"] = entry.details;
-            if (entry.fromHook) json["fromHook"] = true;
-            break;
-        case SessionTreeEntry::Type::Custom:
-            json["customType"] = entry.customType;
-            if (entry.details.is_object() && !entry.details.empty()) json["data"] = entry.details;
-            break;
-        case SessionTreeEntry::Type::CustomMessage:
-            json["customType"] = entry.customType;
-            json["content"] = entry.message.role == Role::User && entry.message.content.size() == 1
-                                  ? Json(entry.message.text_content())
-                                  : Json::array();
-            json["display"] = entry.display;
-            break;
-        case SessionTreeEntry::Type::Label:
-            json["targetId"] = entry.targetId;
-            json["label"] = entry.label.empty() ? Json(nullptr) : Json(entry.label);
-            break;
-        case SessionTreeEntry::Type::SessionInfo:
-            if (!entry.name.empty()) json["name"] = entry.name;
-            break;
-        case SessionTreeEntry::Type::Leaf:
-            json["targetId"] =
-                entry.leafTargetId.empty() ? Json(nullptr) : Json(entry.leafTargetId);
             break;
     }
     return json;
@@ -372,46 +320,6 @@ SessionTreeEntry session_entry_from_json(const Json& json, const std::string& fi
         if (json.contains("details")) entry.details = json["details"];
         entry.fromHook = json.value("fromHook", false);
     }
-    else if (type == "branch_summary")
-    {
-        entry.type = SessionTreeEntry::Type::BranchSummary;
-        entry.fromId = json.value("fromId", "");
-        entry.summary = json.value("summary", "");
-        if (json.contains("details")) entry.details = json["details"];
-        entry.fromHook = json.value("fromHook", false);
-    }
-    else if (type == "custom")
-    {
-        entry.type = SessionTreeEntry::Type::Custom;
-        entry.customType = json.value("customType", "");
-        if (json.contains("data")) entry.details = json["data"];
-    }
-    else if (type == "custom_message")
-    {
-        entry.type = SessionTreeEntry::Type::CustomMessage;
-        entry.customType = json.value("customType", "");
-        entry.display = json.value("display", false);
-    }
-    else if (type == "label")
-    {
-        entry.type = SessionTreeEntry::Type::Label;
-        entry.targetId = json.value("targetId", "");
-        if (json.contains("label") && !json["label"].is_null())
-            entry.label = json["label"].get<std::string>();
-    }
-    else if (type == "session_info")
-    {
-        entry.type = SessionTreeEntry::Type::SessionInfo;
-        entry.name = json.value("name", "");
-    }
-    else if (type == "leaf")
-    {
-        entry.type = SessionTreeEntry::Type::Leaf;
-        if (json.contains("targetId") && !json["targetId"].is_null())
-        {
-            entry.leafTargetId = json["targetId"].get<std::string>();
-        }
-    }
     else
     {
         throw fail("is missing entry type");
@@ -442,7 +350,6 @@ JsonlSessionStorage::JsonlSessionStorage(JsonlSessionStorage&& other) noexcept
       metadata_(std::move(other.metadata_)),
       entries_(std::move(other.entries_)),
       by_id_(std::move(other.by_id_)),
-      labels_by_id_(std::move(other.labels_by_id_)),
       current_leaf_id_(std::move(other.current_leaf_id_))
 {
     // mutex_ 不随对象移动：新对象持有一把全新的锁。
@@ -458,7 +365,6 @@ JsonlSessionStorage& JsonlSessionStorage::operator=(JsonlSessionStorage&& other)
         metadata_ = std::move(other.metadata_);
         entries_ = std::move(other.entries_);
         by_id_ = std::move(other.by_id_);
-        labels_by_id_ = std::move(other.labels_by_id_);
         current_leaf_id_ = std::move(other.current_leaf_id_);
     }
     return *this;
@@ -500,7 +406,19 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
             SessionErrorCode::InvalidSession,
             "Invalid JSONL session file " + path + ": first line is not a valid session header"));
     }
-    if (header.value("type", "") != "session" || header.value("version", 0) != 3)
+    // 字段类型错误（如 "version":"3"）会抛 nlohmann 异常：统一转成 SessionError，
+    // 否则坏会话文件会把异常抛到 main，直接终止进程。
+    bool supported_header = false;
+    try
+    {
+        supported_header = header.is_object() && header.value("type", "") == "session" &&
+                           header.value("version", 0) == 3;
+    }
+    catch (const std::exception&)
+    {
+        supported_header = false;
+    }
+    if (!supported_header)
     {
         return Result<JsonlSessionStorage, SessionError>::err_value(
             session_error(SessionErrorCode::InvalidSession,
@@ -514,7 +432,6 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
     storage.metadata_.createdAt = header.value("timestamp", "");
     storage.metadata_.cwd = header.value("cwd", "");
     storage.metadata_.path = path;
-    storage.metadata_.parentSessionPath = header.value("parentSession", "");
 
     // 已解析成功的部分（用于尾行损坏时的截断修复）
     std::string valid_prefix = lines[0] + "\n";
@@ -536,9 +453,8 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
                 if (!repaired.ok)
                 {
                     return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
-                        SessionErrorCode::Storage,
-                        "Failed to repair truncated session " + path + ": " +
-                            repaired.error.message));
+                        SessionErrorCode::Storage, "Failed to repair truncated session " + path +
+                                                       ": " + repaired.error.message));
                 }
                 break;
             }
@@ -555,6 +471,13 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
         {
             return Result<JsonlSessionStorage, SessionError>::err_value(error);
         }
+        catch (const std::exception& error)
+        {
+            // 合法 JSON 但字段类型不符：同样视为损坏条目，跳过/拒绝而不是崩溃
+            return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
+                SessionErrorCode::InvalidEntry, "Invalid JSONL session file " + path + ": line " +
+                                                    std::to_string(i + 1) + " " + error.what()));
+        }
         if (storage.by_id_.find(entry.id) != storage.by_id_.end())
         {
             return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
@@ -568,41 +491,19 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::open(FileSystem& 
                                                     std::to_string(i + 1) +
                                                     " references an unknown parent"));
         }
-        if (entry.type == SessionTreeEntry::Type::Leaf && !entry.leafTargetId.empty() &&
-            storage.by_id_.find(entry.leafTargetId) == storage.by_id_.end())
-        {
-            return Result<JsonlSessionStorage, SessionError>::err_value(session_error(
-                SessionErrorCode::InvalidEntry, "Invalid JSONL session file " + path + ": line " +
-                                                    std::to_string(i + 1) +
-                                                    " references an unknown leaf target"));
-        }
         valid_prefix += lines[i] + "\n";
         storage.entries_.push_back(entry);
         storage.by_id_[entry.id] = storage.entries_.size() - 1;
-        if (entry.type == SessionTreeEntry::Type::Label && !entry.label.empty())
-        {
-            storage.labels_by_id_[entry.targetId] = entry.label;
-        }
-        else if (entry.type == SessionTreeEntry::Type::Label)
-        {
-            storage.labels_by_id_.erase(entry.targetId);
-        }
-        if (entry.type == SessionTreeEntry::Type::Leaf)
-        {
-            storage.current_leaf_id_ = entry.leafTargetId;
-        }
-        else
-        {
-            storage.current_leaf_id_ = entry.id;
-        }
+        storage.current_leaf_id_ = entry.id;
     }
 
     return Result<JsonlSessionStorage, SessionError>::ok_value(std::move(storage));
 }
 
-Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::create(
-    FileSystem& fs, const std::string& path, const std::string& cwd, const std::string& sessionId,
-    const std::string& parentSessionPath)
+Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::create(FileSystem& fs,
+                                                                      const std::string& path,
+                                                                      const std::string& cwd,
+                                                                      const std::string& sessionId)
 {
     Json header = Json::object();
     header["type"] = "session";
@@ -610,7 +511,6 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::create(
     header["id"] = sessionId;
     header["timestamp"] = iso_timestamp();
     header["cwd"] = cwd;
-    if (!parentSessionPath.empty()) header["parentSession"] = parentSessionPath;
 
     const auto write = fs.write_file(path, header.dump() + "\n");
     if (!write.ok)
@@ -627,7 +527,6 @@ Result<JsonlSessionStorage, SessionError> JsonlSessionStorage::create(
     storage.metadata_.createdAt = header["timestamp"].get<std::string>();
     storage.metadata_.cwd = cwd;
     storage.metadata_.path = path;
-    storage.metadata_.parentSessionPath = parentSessionPath;
     return Result<JsonlSessionStorage, SessionError>::ok_value(std::move(storage));
 }
 
@@ -640,37 +539,6 @@ Result<std::string, SessionError> JsonlSessionStorage::get_leaf_id() const
             SessionErrorCode::InvalidSession, "Entry " + current_leaf_id_ + " not found"));
     }
     return Result<std::string, SessionError>::ok_value(current_leaf_id_);
-}
-
-Result<void, SessionError> JsonlSessionStorage::set_leaf_id(const std::string& leafId)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!leafId.empty() && by_id_.find(leafId) == by_id_.end())
-    {
-        return Result<void, SessionError>::err_value(
-            session_error(SessionErrorCode::NotFound, "Entry " + leafId + " not found"));
-    }
-    SessionTreeEntry entry;
-    entry.type = SessionTreeEntry::Type::Leaf;
-    entry.id = generate_entry_id(by_id_);
-    entry.parentId = current_leaf_id_;
-    entry.timestamp = iso_timestamp();
-    entry.leafTargetId = leafId;
-    const auto append = append_entry_locked(std::move(entry));
-    if (!append.ok) return Result<void, SessionError>::err_value(append.error);
-    return Result<void, SessionError>::ok_value();
-}
-
-std::string JsonlSessionStorage::create_entry_id()
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    return generate_entry_id(by_id_);
-}
-
-Result<void, SessionError> JsonlSessionStorage::append_entry(SessionTreeEntry entry)
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    return append_entry_locked(std::move(entry));
 }
 
 Result<std::string, SessionError> JsonlSessionStorage::append_child(SessionTreeEntry entry)
@@ -688,19 +556,13 @@ Result<void, SessionError> JsonlSessionStorage::append_entry_locked(SessionTreeE
 {
     if (entry.id.empty() || by_id_.find(entry.id) != by_id_.end())
     {
-        return Result<void, SessionError>::err_value(
-            session_error(SessionErrorCode::InvalidEntry, "Session entry id is missing or duplicated"));
+        return Result<void, SessionError>::err_value(session_error(
+            SessionErrorCode::InvalidEntry, "Session entry id is missing or duplicated"));
     }
     if (!entry.parentId.empty() && by_id_.find(entry.parentId) == by_id_.end())
     {
-        return Result<void, SessionError>::err_value(
-            session_error(SessionErrorCode::NotFound, "Parent entry " + entry.parentId + " not found"));
-    }
-    if (entry.type == SessionTreeEntry::Type::Leaf && !entry.leafTargetId.empty() &&
-        by_id_.find(entry.leafTargetId) == by_id_.end())
-    {
         return Result<void, SessionError>::err_value(session_error(
-            SessionErrorCode::NotFound, "Leaf target entry " + entry.leafTargetId + " not found"));
+            SessionErrorCode::NotFound, "Parent entry " + entry.parentId + " not found"));
     }
     const auto append = fs_->append_file(file_path_, session_entry_to_json(entry).dump() + "\n");
     if (!append.ok)
@@ -710,56 +572,8 @@ Result<void, SessionError> JsonlSessionStorage::append_entry_locked(SessionTreeE
     }
     by_id_[entry.id] = entries_.size();
     entries_.push_back(std::move(entry));
-    const auto& pushed = entries_.back();
-    if (pushed.type == SessionTreeEntry::Type::Label && !pushed.label.empty())
-    {
-        labels_by_id_[pushed.targetId] = pushed.label;
-    }
-    else if (pushed.type == SessionTreeEntry::Type::Label)
-    {
-        labels_by_id_.erase(pushed.targetId);
-    }
-    if (pushed.type == SessionTreeEntry::Type::Leaf)
-    {
-        current_leaf_id_ = pushed.leafTargetId;
-    }
-    else
-    {
-        current_leaf_id_ = pushed.id;
-    }
+    current_leaf_id_ = entries_.back().id;
     return Result<void, SessionError>::ok_value();
-}
-
-Result<std::optional<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_entry(
-    const std::string& id) const
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto it = by_id_.find(id);
-    if (it == by_id_.end())
-        return Result<std::optional<SessionTreeEntry>, SessionError>::ok_value(std::nullopt);
-    return Result<std::optional<SessionTreeEntry>, SessionError>::ok_value(entries_[it->second]);
-}
-
-Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::find_entries(
-    SessionTreeEntry::Type type) const
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<SessionTreeEntry> found;
-    for (const auto& entry : entries_)
-    {
-        if (entry.type == type) found.push_back(entry);
-    }
-    return Result<std::vector<SessionTreeEntry>, SessionError>::ok_value(std::move(found));
-}
-
-Result<std::optional<std::string>, SessionError> JsonlSessionStorage::get_label(
-    const std::string& id) const
-{
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto it = labels_by_id_.find(id);
-    if (it == labels_by_id_.end())
-        return Result<std::optional<std::string>, SessionError>::ok_value(std::nullopt);
-    return Result<std::optional<std::string>, SessionError>::ok_value(it->second);
 }
 
 Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_path_to_root(
@@ -784,11 +598,12 @@ Result<std::vector<SessionTreeEntry>, SessionError> JsonlSessionStorage::get_pat
             return Result<std::vector<SessionTreeEntry>, SessionError>::err_value(
                 session_error(SessionErrorCode::NotFound, "Entry " + current + " not found"));
         }
-        path.insert(path.begin(), entries_[it->second]);
+        path.push_back(entries_[it->second]);
         const auto& entry = entries_[it->second];
         if (entry.parentId.empty()) break;
         current = entry.parentId;
     }
+    std::reverse(path.begin(), path.end());
     return Result<std::vector<SessionTreeEntry>, SessionError>::ok_value(std::move(path));
 }
 
@@ -805,29 +620,12 @@ SessionMetadata Session::metadata() const
     return storage_ ? storage_->metadata() : SessionMetadata{};
 }
 
-Result<std::string, SessionError> Session::get_leaf_id() const
-{
-    if (!storage_)
-        return Result<std::string, SessionError>::err_value(
-            session_error(SessionErrorCode::Unknown, "no storage"));
-    return storage_->get_leaf_id();
-}
-
 Result<std::vector<SessionTreeEntry>, SessionError> Session::get_entries() const
 {
     if (!storage_)
         return Result<std::vector<SessionTreeEntry>, SessionError>::err_value(
             session_error(SessionErrorCode::Unknown, "no storage"));
     return storage_->get_entries();
-}
-
-Result<std::optional<SessionTreeEntry>, SessionError> Session::get_entry(
-    const std::string& id) const
-{
-    if (!storage_)
-        return Result<std::optional<SessionTreeEntry>, SessionError>::err_value(
-            session_error(SessionErrorCode::Unknown, "no storage"));
-    return storage_->get_entry(id);
 }
 
 Result<std::vector<SessionTreeEntry>, SessionError> Session::get_branch(
@@ -890,19 +688,6 @@ Result<SessionContext, SessionError> Session::build_context() const
         {
             messages.push_back(entry.message);
         }
-        else if (entry.type == SessionTreeEntry::Type::BranchSummary)
-        {
-            Message summary;
-            summary.role = Role::User;
-            summary.timestamp = 0;
-            summary.content.push_back(ContentBlock{});
-            summary.content.back().type = BlockType::Text;
-            summary.content.back().text =
-                "The following is a summary of a branch that this conversation came back "
-                "from:\n\n<summary>\n" +
-                entry.summary + "</summary>";
-            messages.push_back(std::move(summary));
-        }
     };
 
     if (compaction)
@@ -931,35 +716,6 @@ Result<SessionContext, SessionError> Session::build_context() const
 
     context.messages = std::move(messages);
     return Result<SessionContext, SessionError>::ok_value(std::move(context));
-}
-
-Result<std::optional<std::string>, SessionError> Session::get_label(const std::string& id) const
-{
-    if (!storage_)
-        return Result<std::optional<std::string>, SessionError>::err_value(
-            session_error(SessionErrorCode::Unknown, "no storage"));
-    return storage_->get_label(id);
-}
-
-Result<std::optional<std::string>, SessionError> Session::get_session_name() const
-{
-    if (!storage_)
-        return Result<std::optional<std::string>, SessionError>::err_value(
-            session_error(SessionErrorCode::Unknown, "no storage"));
-    const auto entries = storage_->find_entries(SessionTreeEntry::Type::SessionInfo);
-    if (!entries.ok)
-        return Result<std::optional<std::string>, SessionError>::err_value(entries.error);
-    if (entries.value.empty())
-        return Result<std::optional<std::string>, SessionError>::ok_value(std::nullopt);
-    const auto& name = entries.value.back().name;
-    std::string trimmed = name;
-    // trim
-    size_t start = trimmed.find_first_not_of(" \t\r\n");
-    size_t end = trimmed.find_last_not_of(" \t\r\n");
-    trimmed = (start == std::string::npos) ? "" : trimmed.substr(start, end - start + 1);
-    if (trimmed.empty())
-        return Result<std::optional<std::string>, SessionError>::ok_value(std::nullopt);
-    return Result<std::optional<std::string>, SessionError>::ok_value(trimmed);
 }
 
 Result<std::string, SessionError> Session::append_typed_entry(SessionTreeEntry entry)
@@ -1020,90 +776,6 @@ Result<std::string, SessionError> Session::append_compaction(const std::string& 
     entry.details = details;
     entry.fromHook = fromHook;
     return append_typed_entry(std::move(entry));
-}
-
-Result<std::string, SessionError> Session::append_custom_entry(const std::string& customType,
-                                                               const Json& data)
-{
-    SessionTreeEntry entry;
-    entry.type = SessionTreeEntry::Type::Custom;
-    entry.customType = customType;
-    entry.details = data;
-    return append_typed_entry(std::move(entry));
-}
-
-Result<std::string, SessionError> Session::append_custom_message_entry(
-    const std::string& customType, const std::string& content, bool display)
-{
-    SessionTreeEntry entry;
-    entry.type = SessionTreeEntry::Type::CustomMessage;
-    entry.customType = customType;
-    entry.display = display;
-    Message message;
-    message.role = Role::User;
-    message.content.push_back(ContentBlock{});
-    message.content.back().type = BlockType::Text;
-    message.content.back().text = content;
-    entry.message = std::move(message);
-    return append_typed_entry(std::move(entry));
-}
-
-Result<std::string, SessionError> Session::append_label(const std::string& targetId,
-                                                        const std::string& label)
-{
-    if (!storage_)
-        return Result<std::string, SessionError>::err_value(
-            session_error(SessionErrorCode::Unknown, "no storage"));
-    const auto entry = storage_->get_entry(targetId);
-    if (!entry.ok) return Result<std::string, SessionError>::err_value(entry.error);
-    if (!entry.value.has_value())
-    {
-        return Result<std::string, SessionError>::err_value(
-            session_error(SessionErrorCode::NotFound, "Entry " + targetId + " not found"));
-    }
-    SessionTreeEntry label_entry;
-    label_entry.type = SessionTreeEntry::Type::Label;
-    label_entry.targetId = targetId;
-    label_entry.label = label;
-    return append_typed_entry(std::move(label_entry));
-}
-
-Result<std::string, SessionError> Session::append_session_name(const std::string& name)
-{
-    SessionTreeEntry entry;
-    entry.type = SessionTreeEntry::Type::SessionInfo;
-    entry.name = name;
-    return append_typed_entry(std::move(entry));
-}
-
-Result<std::optional<std::string>, SessionError> Session::move_to(
-    const std::string& entryId, const std::optional<std::string>& summary)
-{
-    if (!storage_)
-        return Result<std::optional<std::string>, SessionError>::err_value(
-            session_error(SessionErrorCode::Unknown, "no storage"));
-    if (!entryId.empty())
-    {
-        const auto entry = storage_->get_entry(entryId);
-        if (!entry.ok)
-            return Result<std::optional<std::string>, SessionError>::err_value(entry.error);
-        if (!entry.value.has_value())
-        {
-            return Result<std::optional<std::string>, SessionError>::err_value(
-                session_error(SessionErrorCode::NotFound, "Entry " + entryId + " not found"));
-        }
-    }
-    const auto set = storage_->set_leaf_id(entryId);
-    if (!set.ok) return Result<std::optional<std::string>, SessionError>::err_value(set.error);
-    if (!summary) return Result<std::optional<std::string>, SessionError>::ok_value(std::nullopt);
-    SessionTreeEntry branch_summary;
-    branch_summary.type = SessionTreeEntry::Type::BranchSummary;
-    branch_summary.fromId = entryId.empty() ? "root" : entryId;
-    branch_summary.parentId = entryId;
-    branch_summary.summary = *summary;
-    const auto id = append_typed_entry(std::move(branch_summary));
-    if (!id.ok) return Result<std::optional<std::string>, SessionError>::err_value(id.error);
-    return Result<std::optional<std::string>, SessionError>::ok_value(id.value);
 }
 
 }  // namespace pi

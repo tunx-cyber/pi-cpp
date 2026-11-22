@@ -2,6 +2,63 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式（无版本号，按日期记录）。
 
+## 2026-11-22（日）交互与内存收尾：/thinking 选择器、异步压缩、流式会话列表
+
+### 新增
+
+- **`/thinking` 选择器**：无参数时与 `/model` 一样用 ↑/↓ 选择（off/minimal/low/medium/high/xhigh），Enter 确认、Esc 取消；`/thinking <级别>` 直接设置。选择器抽象为通用的 `Repl::open_picker`（Model / Thinking 共用渲染与按键逻辑）。
+- **压缩可取消**：`AgentHarness::abort()` 现在同时设置压缩摘用的中止信号；REPL 的 `/compact` 改在 worker 线程执行（UI 不冻结），压缩期间 Esc 即可取消。
+
+### 变更
+
+- **不再做 thinking 能力校验**：删除 `get_supported_thinking_levels` / `clamp_thinking_level` 及启动、模型切换、会话恢复、`/thinking` 里的全部 clamp。`thinkingLevelMap` 只保留 wire 映射；模型是否支持由真实请求决定。请求失败且错误提到 thinking/reasoning 时，终端会提示“可能是模型不支持该 thinking 级别”。
+- **`/sessions` 流式扫描**：新增 `FileSystem::for_each_line`；列表只解析 header 与首个用户消息，消息条数按顶层 `type` 字段统计（利用 nlohmann 对象按 key 排序、type 在行末），不再打开完整会话或把 base64 图片读进内存。
+
+### 修复
+
+- **自动探测的模型不再被间接持久化**：`ensure_model` 只写进程内的 `current_model_id_`（新建会话沿用），后续 `/thinking` 等写配置动作不会再把它写进 settings.json；只有用户主动 `/model` 才持久化。
+
+### 测试
+
+- 新增：`AutoDetectedModelIsNotPersisted`、`ThinkingLevelIsNotClampedByModel`；全套 185 通过 + 1 跳过；`check_format.py` 通过。
+
+## 2026-11-22（日）只保留必要能力：手动压缩、线性会话、单端点兼容、/context、主题
+
+### 新增
+
+- **`/context`**：用 `estimate_context_tokens`（字符数/4、图片 4800）显示当前上下文的 token 估算、消息条数与模型上下文上限占用百分比。
+- **启动默认新会话**：不带 `--resume` 时总是新建会话文件；`--resume [id]` / `/resume` 恢复时才读取历史，并在恢复后**回放完整对话**（用户/助手文本、工具调用、工具结果，单条展示上限约 2000 字符，`conversation_format` 可单测）。
+- **主题（预留）**：新增 `include/pi/app/theme.h`（提示符/用户/助手/思考/工具/错误/弱化信息），内置 `default` 与 `mono`；`settings.json` 增加 `theme` 键，`NO_COLOR` 环境变量强制 mono。目前应用于提示符、状态栏、工具行、错误与对话回放。
+- **skills 真正接入**：`AgentHarnessOptions::skills` 现在由 `AgentSession` 从 `~/.pi-cpp/skills` 加载并写入 system prompt（此前 `/skills` 只打印列表，模型看不到技能）。
+- **交互模式默认装配编码工具**：read/bash/edit/write/grep/find/ls/web_fetch/web_search + subagent，与一次性模式一致；不再需要先执行 `/tools`（该命令保留为重新加载）。
+- **工具输出上限**：`ExecOptions::maxOutputBytes`，bash 工具设为 256 KiB，超出丢弃并在结果里标注 `[output truncated: N bytes dropped]`。
+
+### 变更
+
+- **只保留手动 `/compact`**：删除自动压缩（`maybe_auto_compact`、`should_compact`、`CompactionSettings::enabled`）；`reserveTokens`/`keepRecentTokens` 仅影响手动压缩切点，旧 settings.json 的 `compaction.enabled` 键被忽略。
+- **会话格式线性化**：删除 pi 的 branch/fork/label/custom/session_info/leaf 条目与对应 API（`move_to`/`append_label`/`append_custom_*`/`set_leaf_id` 等），会话只保留 message / thinking_level_change / model_change / active_tools_change / compaction；`parentId` 仍写入并校验链式完整。
+- **端点兼容收缩**：`detect_compat` 只区分 DeepSeek 与通用 OpenAI 兼容端点，删除 zai/moonshot/together/xai/cerebras/chutes 分支、`strict`/`raw` 工具字段与无用 compat 开关；`max_tokens` 统一使用 `max_tokens` 字段。
+- **`/clear` 语义修正**：改为新建会话文件（原先只清内存，`/resume` 会把旧历史带回来）；移除 `AgentSession::reset()`。
+- **流式热路径降复杂度**：delta 事件不再复制整条部分消息（原先 transport/agent_loop/agent 每 token 复制约 6 次，O(n²)），工具参数只在块结束时解析一次；删除无人调用的 `Agent::streaming_message_`。
+- **SSE 容错**：`data: [DONE]` 不再计入 malformed chunk；200 流内的 `{"error":...}` 转为 Error 事件（原先被吞成 "缺少 finish_reason"）。
+- **REPL 可靠性**：处理 `POLLHUP/POLLERR/POLLNVAL`（tty 关闭不再 100% CPU 自旋）、纯空白输入不提交、工具失败显示 `failed` 并展示错误、edit 参数类型不符不再抛异常、每轮清零 `last_turn_usage_`、启动时按模型 clamp thinking、`byCwd.model` 类型错误不再导致启动崩溃、析构时退订事件监听。
+- **内存监控**：删除 UI 已不显示的 `virtualBytes/hasVirtual` 字段与解析。
+
+### 移除
+
+- 自动上下文压缩、会话分支/标注/自定义条目 API、多 provider 兼容分支、CMake 中未使用的 `OBJCXX` 语言与重复的 `tests/main.cpp`。
+- **从未在生产触发的扩展面**（约 −560 行）：agent hooks（`convertToLlm`/`transformContext`/`beforeToolCall`/`afterToolCall`/`prepareNextTurn`）及配套类型、follow-up 队列与 `QueueMode`、`continue_run`/`run_agent_loop_continue`、`tool_execution_update` 事件与 `AgentTool::execute` 的 `onUpdate` 参数、`AgentTool::label`/`prepareArguments`/`parse_tool_args`，以及 `tools()/is_busy()/wait_for_idle()` 等无调用者的包装。
+
+### 内存（请求路径）
+
+- `transform_messages` 改为单遍转换（每条消息只拷贝一次），并去掉 `transformContext` 遗留的整份 transcript 拷贝与恒等的 `default_convert_to_llm` 拷贝。
+- deepseek 的 `thinking` / `reasoning_content` 改由 `ChatCompletionRequest::extra` / `ChatMessage::extra` 在序列化时合并，删除 HttpClient 层的 body augmenter（不再对整包请求体 parse→dump）。
+- `request.messages` 改为 move，HTTP 请求按 const 引用发送、请求对象每请求只构建一次。单次请求的 transcript 全量拷贝从约 9 份降到约 4 份（context → transform → wire → body）。
+
+### 测试
+
+- 全套 195 用例：194 通过 + 1 跳过（联网用例）；新增 skills 注入、新会话清空、会话类型错误容错、流内 error、delta 不携带整条消息、bash 输出截断、主题、对话回放格式等用例；`scripts/check_format.py` 通过。
+
 ## 2026-08-17（一）依赖瘦身：nlohmann/json vendored + 移除 valijson
 
 ### 变更

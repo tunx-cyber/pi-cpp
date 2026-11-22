@@ -1,26 +1,24 @@
 #pragma once
 
 #include <cstdint>
+
 #include <string>
 #include <string_view>
 
 namespace pi
 {
 
-/** 当前 picpp 进程的内存快照。不可用的字段以 false 标记。 */
+/** 当前 picpp 进程的驻留内存快照。不可用时 hasResident=false。 */
 struct ProcessMemoryUsage
 {
     uint64_t residentBytes = 0;
-    uint64_t virtualBytes = 0;
     bool hasResident = false;
-    bool hasVirtual = false;
 };
 
 /**
- * 采样当前进程实际使用的内存。
- * Linux 使用 /proc/self/status 的 VmRSS/VmSize；
- * macOS 使用 task_vm_info：rss 取 phys_footprint（与「活动监视器」口径一致，
- * 含压缩页），vms 取 virtual_size（含稀疏映射，数值大不代表实际占用）。
+ * 采样当前进程实际使用的内存（只取驻留内存）。
+ * Linux 使用 /proc/self/status 的 VmRSS；macOS 使用 task_vm_info 的 phys_footprint
+ * （与「活动监视器」口径一致，含压缩页）。
  * 不支持的平台或系统调用失败时返回标记为不可用的快照，不抛出异常。
  */
 ProcessMemoryUsage sample_process_memory();

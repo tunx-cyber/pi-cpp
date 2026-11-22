@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "pi/ai/model_list.h"
 #include "pi/app/settings.h"
 #include "pi/harness/agent_harness.h"
 #include "pi/harness/env.h"
@@ -14,8 +15,8 @@ namespace pi
 {
 
 /**
- * REPL 会话装配：AgentHarness + 会话仓库 + 成本累计 + 模型/thinking 按 cwd 持久化。
- * 镜像 pi 的 AgentSession。
+ * REPL 会话装配：AgentHarness + 会话仓库 + token 用量累计 + 模型/thinking 按 cwd 持久化。
+ * 镜像 pi 的 AgentSession。价格随时变动，因此只累计四项 token，不累计金额。
  */
 class AgentSession
 {
@@ -35,18 +36,25 @@ class AgentSession
 
     void prompt(const std::string& text, const std::vector<ContentBlock>& images = {});
     void steer(AgentMessage message);
-    void follow_up(AgentMessage message);
     void abort();
-    void reset();
-    bool is_busy() const;
-    void wait_for_idle();
 
     void set_tools(std::vector<AgentTool> tools);
-    /** 切换模型（按 cwd 持久化）。 */
+    /** 切换模型（按 cwd 持久化）。注册表里没有的 id（如 /models 返回的远端模型）按自定义模型接入。
+     */
     void set_model(const std::string& modelId);
+    /**
+     * 确定当前模型：已有模型（会话记录 / settings.json / PI_MODEL）时直接返回；
+     * 否则取端点 `GET /models` 返回的第一个模型作为默认模型（不写入 settings.json）。
+     * 失败时返回 false 并写入 errorOut（端点不可达 / 未返回任何模型）。
+     * 前置条件：会话已创建或恢复（需要向会话写入模型切换记录）。
+     */
+    bool ensure_model(std::string* errorOut = nullptr);
     /** 切换 thinking（按 cwd 持久化）。 */
     void set_thinking(ThinkingLevel level);
     bool compact(std::string* errorOut = nullptr);
+
+    /** 通过 OpenAI 兼容端点 `GET {baseUrl}/models` 获取可用模型（不缓存、不抛异常）。 */
+    RemoteModelList list_models() const;
 
     std::vector<SessionMetadata> list_sessions() const;
 
@@ -54,33 +62,38 @@ class AgentSession
     ModelInfo model() const;
     ThinkingLevel thinking_level() const;
     std::string system_prompt() const;
-    // 成本/用量由 run 线程（监听器）写、UI 线程读，统一经 cost_mutex_ 保护。
-    double total_cost() const;
-    double all_time_cost() const;
+    // 用量由 run 线程（监听器）写、UI 线程读，统一经 usage_mutex_ 保护。
+    /** 当前会话累计 token 用量（/new、/resume、/clear 后清零）。 */
+    Usage session_usage() const;
+    /** 本进程累计 token 用量（跨会话，重启清零）。 */
+    Usage all_time_usage() const;
+    /** 最近一次 LLM 调用的用量（含工具循环中的中间调用）。 */
     Usage last_turn_usage() const;
     /** 当前已解析的 API key（可能为空）。 */
     const std::string& api_key() const { return settings_.apiKey; }
+    /** OpenAI 兼容端点（/models 与 chat/completions 共用）。 */
+    const std::string& base_url() const { return settings_.baseUrl; }
     const WebSearchConfig& web_search_config() const { return settings_.webSearch; }
-    const std::string& cwd() const { return cwd_; }
-    Session& session() { return harness_.session(); }
-    AgentHarness& harness() { return harness_; }
 
     std::function<void()> subscribe(AgentEventListener listener);
 
    private:
     std::optional<std::string> resolve_api_key() const;
-    ModelInfo resolve_model() const;
+    /** 已配置的模型（settings.json / byCwd / PI_MODEL）；未配置返回 nullopt。 */
+    std::optional<ModelInfo> resolve_model() const;
     bool open_and_load(const SessionMetadata& metadata, std::string* errorOut);
-    void reset_turn_cost();
+    void reset_session_usage();
 
     Settings settings_;
     std::string cwd_;
+    /** ensure_model 自动探测出的模型 id：只在进程内有效，不写入 settings.json。 */
+    std::string current_model_id_;
     PosixFileSystem fs_;
     JsonlSessionRepo repo_;
     AgentHarness harness_;
-    mutable std::mutex cost_mutex_;  // 保护 total_cost_/all_time_cost_/last_turn_usage_
-    double total_cost_ = 0;
-    double all_time_cost_ = 0;
+    mutable std::mutex usage_mutex_;  // 保护 session_usage_/all_time_usage_/last_turn_usage_
+    Usage session_usage_;
+    Usage all_time_usage_;
     Usage last_turn_usage_;
 };
 

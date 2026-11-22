@@ -5,21 +5,15 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include <cstdio>
-#include <cstdlib>
+#include <cctype>
 
-#include <algorithm>
 #include <iostream>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
-#include "pi/ai/model_registry.h"
-#include "pi/app/commands.h"
-#include "pi/app/images.h"
-#include "pi/harness/prompt_templates.h"
-#include "pi/harness/skills.h"
+#include "pi/app/conversation_format.h"
+#include "pi/app/usage_format.h"
 #include "pi/util/scope_exit.h"
 #include "terminal_input.h"
 
@@ -36,20 +30,19 @@ namespace
 
 constexpr const char* kBanner =
     "pi-cpp — C++ terminal agent (pi 移植版)\n"
-    "输入 / 唤起命令菜单（Tab 补全）。Enter=提交  Shift+Enter/Ctrl+J/Option+Enter=换行\n"
-    "流式中：Enter=steer Esc=abort Ctrl+C=退出（确认）Ctrl+P=切模型 Ctrl+L=重绘\n";
-
-/** 命令菜单最多显示的条目数。 */
-constexpr size_t kMenuMaxLines = 8;
+    "输入 / 唤起命令菜单（↑/↓ 选择 Tab 补全 Enter 执行）。Enter=提交  "
+    "Shift+Enter/Ctrl+J/Option+Enter=换行\n"
+    "/model = 上下键选择模型。流式中：Enter=steer Esc=abort Ctrl+C=退出（确认）"
+    "Ctrl+P=切模型 Ctrl+L=重绘\n";
 
 std::string status_text(const AgentSession& session, const ProcessMemoryUsage& memory,
                         const ProcessMemoryUsage& peak_memory)
 {
     const ModelInfo model = session.model();
     std::string thinking = to_string(session.thinking_level());
-    std::string out = "[model=" + model.id + "] [thinking=" + thinking + "]";
-    out += " [turn=¥" + std::to_string(session.total_cost()) + "]";
-    out += " [all=¥" + std::to_string(session.all_time_cost()) + "]";
+    // 未配置模型且端点未就绪时，明确显示"未选择"，避免让人误以为在用某个默认模型。
+    const std::string model_id = model.id.empty() ? "未选择" : model.id;
+    std::string out = "[model=" + model_id + "] [thinking=" + thinking + "]";
     out += " [mem " + format_process_memory(memory);
     if (peak_memory.hasResident)
     {
@@ -59,28 +52,42 @@ std::string status_text(const AgentSession& session, const ProcessMemoryUsage& m
     return out;
 }
 
-/** 格式化 usage 为 tokens: in=N out=M cache=K 一行。 */
-std::string format_usage_line(const Usage& usage)
+/** 错误信息里是否提到 thinking/reasoning（用于给出调整提示）。 */
+bool mentions_thinking(const std::string& text)
 {
-    std::string line = "Tokens: in=" + std::to_string(usage.input) +
-                       " out=" + std::to_string(usage.output) +
-                       " cache=" + std::to_string(usage.cacheRead + usage.cacheWrite);
-    if (usage.cacheRead > 0) line += " (read=" + std::to_string(usage.cacheRead) + ")";
-    if (usage.cacheWrite > 0) line += " (write=" + std::to_string(usage.cacheWrite) + ")";
-    return line;
+    std::string lower;
+    lower.reserve(text.size());
+    for (char c : text) lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return lower.find("thinking") != std::string::npos ||
+           lower.find("reasoning") != std::string::npos;
 }
+
+/** 读取字符串参数；非 object 或类型不符时返回空串（nlohmann 的 value() 遇到类型不符会抛）。 */
+std::string string_arg(const Json& args, const char* key)
+{
+    if (!args.is_object()) return "";
+    const auto it = args.find(key);
+    return it != args.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
+/** 格式化 usage 为四项 token 单行文本（单价无法确定，不换算金额）。 */
+std::string format_usage_line(const Usage& usage) { return "Tokens: " + format_token_usage(usage); }
 
 }  // namespace
 
-Repl::Repl(AgentSession& session, std::string cwd)
-    : session_(session), cwd_(std::move(cwd)), fs_(cwd_)
+Repl::Repl(AgentSession& session, std::string cwd, Theme theme, bool show_history_on_start)
+    : session_(session),
+      cwd_(std::move(cwd)),
+      fs_(cwd_),
+      theme_(std::move(theme)),
+      show_history_on_start_(show_history_on_start)
 {
     pipe(event_pipe_);
     fcntl(event_pipe_[0], F_SETFL, O_NONBLOCK);
     fcntl(event_pipe_[1], F_SETFL, O_NONBLOCK);
 
     // 单一订阅（构造时注册一次，避免每次 run 累积订阅导致事件重复处理）
-    session_.subscribe(
+    unsubscribe_ = session_.subscribe(
         [this](const AgentEvent& event, const std::shared_ptr<std::atomic<bool>>&)
         {
             if (event.type == AgentEvent::Type::MessageUpdate && event.assistantMessageEvent)
@@ -112,11 +119,11 @@ Repl::Repl(AgentSession& session, std::string cwd)
             {
                 // 收集工具输出的文本部分；edit 工具生成 diff 格式
                 std::string detail;
-                if (event.toolName == "edit")
+                if (event.toolName == "edit" && !event.isError)
                 {
-                    // LLM 可能传非字符串参数；用 value() 兜底，避免 get<string>() 抛异常
-                    const std::string old_str = event.args.value("oldString", std::string(""));
-                    const std::string new_str = event.args.value("newString", std::string(""));
+                    // LLM 可能传非字符串参数；参数类型不符时直接当作空串，避免抛异常中断整轮
+                    const std::string old_str = string_arg(event.args, "oldString");
+                    const std::string new_str = string_arg(event.args, "newString");
                     // 格式：每行前加 -（删除）/ +（新增），左侧空白填充对齐
                     auto format_diff = [](const std::string& s, const char* prefix)
                     {
@@ -138,7 +145,9 @@ Repl::Repl(AgentSession& session, std::string cwd)
                         if (block.type == BlockType::Text) detail += block.text;
                     }
                 }
-                enqueue(UiEvent{UiEvent::Type::ToolEnd, "", event.toolName, std::move(detail)});
+                UiEvent ui_event{UiEvent::Type::ToolEnd, "", event.toolName, std::move(detail)};
+                ui_event.isError = event.isError;
+                enqueue(std::move(ui_event));
             }
             if (event.type == AgentEvent::Type::MessageEnd && event.message.role == Role::Assistant)
             {
@@ -147,11 +156,16 @@ Repl::Repl(AgentSession& session, std::string cwd)
                     const std::string message = event.message.errorMessage.empty()
                                                     ? "AI request failed"
                                                     : event.message.errorMessage;
-                    enqueue(UiEvent{UiEvent::Type::Delta, "\r\n[error] " + message + "\n", "", ""});
+                    enqueue(
+                        UiEvent{UiEvent::Type::Delta,
+                                "\r\n" + styled(theme_, theme_.error, "[error] " + message) + "\n",
+                                "", ""});
                 }
                 else if (event.message.stopReason == StopReason::Aborted)
                 {
-                    enqueue(UiEvent{UiEvent::Type::Delta, "\r\n[aborted]\n", "", ""});
+                    enqueue(UiEvent{UiEvent::Type::Delta,
+                                    "\r\n" + styled(theme_, theme_.dim, "[aborted]") + "\n", "",
+                                    ""});
                 }
             }
             if (event.type == AgentEvent::Type::AgentEnd)
@@ -164,6 +178,7 @@ Repl::Repl(AgentSession& session, std::string cwd)
 Repl::~Repl()
 {
     session_.abort();
+    if (unsubscribe_) unsubscribe_();
     PosixShell::kill_all_children();
     if (worker_.joinable()) worker_.join();
     if (event_pipe_[0] >= 0) close(event_pipe_[0]);
@@ -173,6 +188,7 @@ Repl::~Repl()
 int Repl::run()
 {
     print_banner();
+    if (show_history_on_start_) print_conversation();
     enter_raw_mode();
     ScopeExit restore_terminal([this]() noexcept { restore_raw_mode(); });
 
@@ -208,6 +224,8 @@ int Repl::run()
             drain_events();
             continue;
         }
+        // 终端关闭/失联：poll 会持续返回 POLLHUP，不处理就会 100% CPU 自旋且永不退出。
+        const bool stdin_gone = (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0;
         if (fds[0].revents & POLLIN)
         {
             try
@@ -218,6 +236,11 @@ int Repl::run()
             {
                 std::cout << "\r\n[error] " << error.what() << std::endl;
             }
+        }
+        if (stdin_gone)
+        {
+            quit_requested_ = true;
+            break;
         }
     }
 
@@ -251,7 +274,14 @@ ProcessMemoryUsage Repl::sample_memory()
 
 void Repl::print_status()
 {
-    std::cout << status_text(session_, sample_memory(), peak_memory_) << std::endl;
+    std::cout << styled(theme_, theme_.dim, status_text(session_, sample_memory(), peak_memory_))
+              << std::endl;
+}
+
+void Repl::print_conversation()
+{
+    std::cout << format_conversation(session_.messages(), theme_);
+    std::cout.flush();
 }
 
 void Repl::enter_raw_mode()
@@ -286,59 +316,57 @@ void Repl::restore_raw_mode()
 
 // ---------- 渲染 ----------
 
-void Repl::draw_prompt()
+void Repl::clear_rendered_area()
 {
-    const ProcessMemoryUsage memory = sample_memory();
-
-    // 命令菜单（仅空闲且缓冲区以 / 开头时渲染）
-    const bool menu = command_menu_active();
-    std::vector<CommandEntry> menu_entries;
-    if (menu)
-    {
-        menu_entries = matching_commands();
-    }
-    const size_t menu_shown = std::min(menu_entries.size(), kMenuMaxLines);
-    const bool menu_overflow = menu_entries.size() > kMenuMaxLines;
-    const int menu_lines = static_cast<int>(menu_shown) + (menu_overflow ? 1 : 0);
-
-    const int total_lines = 1 + static_cast<int>(count_newlines(line_buffer_)) + menu_lines;
-
-    // 1) 回到提示行行首，逐行清除上一次渲染的内容（多行输入 + 菜单行）
+    // 回到渲染区域首行行首：光标当前位于输入区第 rendered_cursor_row_ 行。
     if (rendered_cursor_row_ > 0) std::cout << "\033[" << rendered_cursor_row_ << "A";
     std::cout << "\r";
+    // 逐行清除上次渲染的内容（提示行 + 多行输入 + 菜单/选择器）
     for (int i = 0; i < rendered_lines_; ++i)
     {
         std::cout << "\033[2K";
         if (i + 1 < rendered_lines_) std::cout << "\033[1B";
     }
-    // 2) 回到提示行行首重新渲染
     std::cout << "\r";
     if (rendered_lines_ > 1) std::cout << "\033[" << (rendered_lines_ - 1) << "A";
     std::cout << "\r";
+}
 
-    const std::string prompt_prefix = "[mem " + format_process_memory(memory) + "] pi> ";
-    std::cout << prompt_prefix << line_buffer_;
+void Repl::print_above_prompt(const std::string& text)
+{
+    clear_rendered_area();
+    rendered_lines_ = 1;
+    rendered_extra_lines_ = 0;
+    rendered_cursor_row_ = 0;
+    std::cout << text << "\n" << std::flush;
+}
 
-    // 3) 渲染命令菜单（输入区之下）
-    if (menu_lines > 0)
+void Repl::draw_prompt()
+{
+    const ProcessMemoryUsage memory = sample_memory();
+
+    // 输入区下方的内容：模型选择器优先，其次是命令菜单（仅空闲且以 / 开头）。
+    std::vector<std::string> extra_lines;
+    if (picker_active_)
     {
-        size_t max_name = 0;
-        for (size_t i = 0; i < menu_shown; ++i)
-        {
-            max_name = std::max(max_name, menu_entries[i].name.size());
-        }
-        for (size_t i = 0; i < menu_shown; ++i)
-        {
-            std::string line = "  /" + menu_entries[i].name;
-            line.append(max_name - menu_entries[i].name.size() + 2, ' ');
-            line += menu_entries[i].description;
-            std::cout << "\r\n\033[2K" << line;
-        }
-        if (menu_overflow)
-        {
-            std::cout << "\r\n\033[2K  ... (+" << (menu_entries.size() - kMenuMaxLines) << " more)";
-        }
+        extra_lines = picker_lines();
     }
+    else if (command_menu_active())
+    {
+        extra_lines = command_menu_lines();
+    }
+    const int extra_count = static_cast<int>(extra_lines.size());
+    const int total_lines = 1 + static_cast<int>(count_newlines(line_buffer_)) + extra_count;
+
+    // 1) 清除上一次渲染的区域，回到提示行行首
+    clear_rendered_area();
+
+    // 2) 渲染提示符与输入内容
+    const std::string prompt_text = "[mem " + format_process_memory(memory) + "] pi> ";
+    std::cout << styled(theme_, theme_.prompt, prompt_text) << line_buffer_;
+
+    // 3) 渲染输入区下方的内容（命令菜单 / 模型选择器）
+    for (const auto& line : extra_lines) std::cout << "\r\n\033[2K" << line;
 
     // 4) 光标定位：按「行 + 显示宽度」回到光标位置（多行输入与全角字符感知）。
     //    首行还要加上提示符前缀的宽度（\r 回到的是该行第 0 列）。
@@ -353,10 +381,11 @@ void Repl::draw_prompt()
     const int lines_above = total_lines - 1 - static_cast<int>(row);
     if (lines_above > 0) std::cout << "\033[" << lines_above << "A";
     std::cout << "\r";
-    const size_t target_col = col + (row == 0 ? display_width(prompt_prefix) : 0);
+    const size_t target_col = col + (row == 0 ? display_width(prompt_text) : 0);
     if (target_col > 0) std::cout << "\033[" << target_col << "C";
 
     rendered_lines_ = total_lines;
+    rendered_extra_lines_ = extra_count;
     rendered_cursor_row_ = static_cast<int>(row);
     std::cout.flush();
 }
@@ -375,8 +404,8 @@ void Repl::handle_input()
             case KeyEvent::Type::Esc:
                 request_abort();
                 break;
-            case KeyEvent::Type::Enter:  // steer：把已输入的行入队
-                if (!line_buffer_.empty())
+            case KeyEvent::Type::Enter:  // steer：把已输入的行入队（压缩期间忽略）
+                if (prompt_run_ && !line_buffer_.empty())
                 {
                     session_.steer(Message::user(line_buffer_));
                     line_buffer_.clear();
@@ -413,6 +442,13 @@ void Repl::handle_input()
         return;
     }
 
+    // 模型选择器优先接管方向键/Enter/Esc（不进入行编辑）
+    if (picker_active_)
+    {
+        handle_picker_key(key);
+        return;
+    }
+
     switch (key.type)
     {
         case KeyEvent::Type::CtrlC:
@@ -430,7 +466,12 @@ void Repl::handle_input()
         case KeyEvent::Type::End:
             cursor_ = line_buffer_.size();
             break;
-        case KeyEvent::Type::Up:  // 上一条历史
+        case KeyEvent::Type::Up:  // 菜单打开时选择上一个命令，否则回到上一条历史
+            if (command_menu_active() && !matching_commands().empty())
+            {
+                move_menu_selection(-1);
+                break;
+            }
             if (!history_.empty())
             {
                 if (history_index_ == -1)
@@ -445,7 +486,12 @@ void Repl::handle_input()
                 }
             }
             break;
-        case KeyEvent::Type::Down:  // 下一条历史
+        case KeyEvent::Type::Down:  // 菜单打开时选择下一个命令，否则到下一条历史
+            if (command_menu_active() && !matching_commands().empty())
+            {
+                move_menu_selection(1);
+                break;
+            }
             if (history_index_ >= 0)
             {
                 --history_index_;
@@ -461,6 +507,8 @@ void Repl::handle_input()
             }
             break;
         case KeyEvent::Type::Enter:
+            // 菜单打开时 Enter = 执行当前选中项（↑/↓ 选择，Tab 只补全不执行）
+            if (command_menu_active() && !matching_commands().empty()) accept_menu_selection();
             submit_line();
             break;
         case KeyEvent::Type::ShiftEnter:  // 换行（Shift+Enter / Ctrl+J / Option+Enter）
@@ -475,6 +523,7 @@ void Repl::handle_input()
         case KeyEvent::Type::CtrlL:  // 清屏重绘
             std::cout << "\033[2J\033[H";
             rendered_lines_ = 1;
+            rendered_extra_lines_ = 0;
             rendered_cursor_row_ = 0;
             print_banner();
             break;
@@ -500,11 +549,13 @@ void Repl::insert_at_cursor(const std::string& text)
     line_buffer_.insert(line_buffer_.begin() + static_cast<ptrdiff_t>(cursor_), text.begin(),
                         text.end());
     cursor_ += text.size();
+    menu_index_ = 0;  // 输入变化后候选列表随之变化，选中项回到第一项
 }
 
 void Repl::erase_char_before_cursor()
 {
     if (cursor_ == 0) return;
+    menu_index_ = 0;
     // 按 UTF-8 序列删除，避免删掉半个中文字符
     size_t start = cursor_ - 1;
     while (start > 0 && (static_cast<unsigned char>(line_buffer_[start]) & 0xC0) == 0x80)
@@ -522,42 +573,46 @@ void Repl::submit_line()
     const size_t cursor_row = count_newlines(line_buffer_.substr(0, cursor_));
     const int rows_below_input = static_cast<int>(total_newlines - cursor_row);
     for (int i = 0; i < rows_below_input; ++i) std::cout << "\r\n";
-    const int menu_lines = command_menu_active()
-                               ? std::min<int>(static_cast<int>(matching_commands().size()),
-                                               static_cast<int>(kMenuMaxLines))
-                               : 0;
-    for (int i = 0; i < menu_lines; ++i) std::cout << "\r\n\033[2K";
-    if (menu_lines > 0) std::cout << "\033[" << menu_lines << "A";
+    // 跳过菜单/选择器占用的行（使用上次实际渲染的行数，含滚动提示行）
+    const int extra_lines = rendered_extra_lines_;
+    for (int i = 0; i < extra_lines; ++i) std::cout << "\r\n\033[2K";
+    if (extra_lines > 0) std::cout << "\033[" << extra_lines << "A";
     std::cout << "\r\n";
 
     std::string line = line_buffer_;
     line_buffer_.clear();
     cursor_ = 0;
     history_index_ = -1;
+    menu_index_ = 0;
     rendered_lines_ = 1;
+    rendered_extra_lines_ = 0;
     rendered_cursor_row_ = 0;
 
-    if (!line.empty())
+    // 去掉首尾空白：纯空白行既不进历史，也不发一次空请求。
+    const size_t first = line.find_first_not_of(" \t");
+    if (first == std::string::npos)
     {
-        // 记入历史（跳过连续重复）
-        if (history_.empty() || history_.back() != line)
-        {
-            history_.push_back(line);
-        }
-        // 去掉前导空白：` /clear` 应视为命令而非 prompt
-        const size_t first = line.find_first_not_of(" \t");
-        if (first != std::string::npos)
-        {
-            line = line.substr(first);
-        }
-        if (line.front() == '/')
-        {
-            handle_command(line);
-        }
-        else if (!line.empty())
-        {
-            start_run(line);
-        }
+        return;
+    }
+    line = line.substr(first, line.find_last_not_of(" \t") - first + 1);
+
+    // 记入历史（跳过连续重复）
+    if (history_.empty() || history_.back() != line)
+    {
+        history_.push_back(line);
+    }
+    if (line.front() == '/')
+    {
+        handle_command(line);
+    }
+    else if (session_.model().id.empty())
+    {
+        // 未配置默认模型且尚未从端点取到模型：不发送空模型请求。
+        std::cout << "尚未选择模型：请先运行 /model 选择（列表来自 GET /models）" << std::endl;
+    }
+    else
+    {
+        start_run(line);
     }
 }
 
@@ -570,6 +625,7 @@ void Repl::request_abort()
 void Repl::start_run(const std::string& line)
 {
     streaming_ = true;
+    prompt_run_ = true;
     run_finished_.store(false);
 
     worker_ = std::thread(
@@ -585,6 +641,33 @@ void Repl::start_run(const std::string& line)
                                 ""});
                 enqueue(UiEvent{UiEvent::Type::RunEnd, "", "", ""});
             }
+            run_finished_.store(true);
+        });
+}
+
+void Repl::start_compact()
+{
+    if (streaming_) return;
+    streaming_ = true;
+    prompt_run_ = false;
+    run_finished_.store(false);
+    std::cout << "压缩中…（Esc 取消）" << std::endl;
+    worker_ = std::thread(
+        [this]
+        {
+            std::string error;
+            bool ok = false;
+            try
+            {
+                ok = session_.compact(&error);
+            }
+            catch (const std::exception& e)
+            {
+                error = e.what();
+            }
+            enqueue(UiEvent{UiEvent::Type::Delta, ok ? "已压缩会话\n" : "压缩失败：" + error + "\n",
+                            "", ""});
+            enqueue(UiEvent{UiEvent::Type::RunEnd, "", "", ""});
             run_finished_.store(true);
         });
 }
@@ -619,15 +702,21 @@ void Repl::drain_events()
             case UiEvent::Type::ToolStart:
                 if (event.toolName == "bash" && !event.detail.empty())
                 {
-                    std::cout << "\r\n\033[2K[tool:bash] " << event.detail << std::endl;
+                    std::cout << "\r\n\033[2K"
+                              << styled(theme_, theme_.tool, "[tool:bash] " + event.detail)
+                              << std::endl;
                 }
                 else if (event.toolName == "edit" && !event.detail.empty())
                 {
-                    std::cout << "\r\n\033[2K[tool:edit] " << event.detail << std::endl;
+                    std::cout << "\r\n\033[2K"
+                              << styled(theme_, theme_.tool, "[tool:edit] " + event.detail)
+                              << std::endl;
                 }
                 else
                 {
-                    std::cout << "\r\n\033[2K[tool] " << event.toolName << " ..." << std::endl;
+                    std::cout << "\r\n\033[2K"
+                              << styled(theme_, theme_.tool, "[tool] " + event.toolName + " ...")
+                              << std::endl;
                 }
                 break;
             case UiEvent::Type::ToolEnd:
@@ -665,17 +754,22 @@ void Repl::drain_events()
                         std::cout << "\n(truncated, total " << event.detail.size() << " chars)";
                     std::cout << std::endl;
                 }
-                std::cout << "\r\033[2K[tool] " << event.toolName << " done" << std::endl;
+                std::cout << "\r\033[2K"
+                          << styled(
+                                 theme_, event.isError ? theme_.error : theme_.tool,
+                                 "[tool] " + event.toolName + (event.isError ? " failed" : " done"))
+                          << std::endl;
                 break;
             }
             case UiEvent::Type::RunEnd:
                 if (worker_.joinable()) worker_.join();
                 streaming_ = false;
-                if (session_.last_turn_usage().totalTokens > 0)
+                if (prompt_run_ && session_.last_turn_usage().totalTokens > 0)
                 {
                     std::cout << "\r\n"
                               << format_usage_line(session_.last_turn_usage()) << std::endl;
                 }
+                prompt_run_ = false;
                 print_status();
                 break;
         }

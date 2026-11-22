@@ -151,6 +151,8 @@ struct ExecOptions
     std::map<std::string, std::string> env;
     std::optional<int> timeoutSeconds;
     std::shared_ptr<std::atomic<bool>> abort;
+    /** 单次命令保留的输出上限（0 = 不限制）；超出部分丢弃并计入 truncatedBytes。 */
+    size_t maxOutputBytes = 0;
     std::function<void(const std::string&)> onStdout;
     std::function<void(const std::string&)> onStderr;
 };
@@ -160,6 +162,7 @@ struct ExecResult
     std::string stdout;
     std::string stderr;
     int exitCode = 0;
+    size_t truncatedBytes = 0;
 };
 
 /** 文件系统能力接口（POSIX 实现；操作不抛异常，失败编码为 Result）。 */
@@ -173,6 +176,9 @@ class FileSystem
     virtual Result<std::string, FileError> read_text_file(const std::string& path) = 0;
     virtual Result<std::vector<std::string>, FileError> read_text_lines(const std::string& path,
                                                                         int maxLines = -1) = 0;
+    /** 逐行流式读取（不把整个文件载入内存）；callback 返回 false 时提前停止。 */
+    virtual Result<void, FileError> for_each_line(
+        const std::string& path, const std::function<bool(const std::string&)>& callback) = 0;
     virtual Result<void, FileError> write_file(const std::string& path,
                                                const std::string& content) = 0;
     virtual Result<void, FileError> append_file(const std::string& path,
@@ -209,12 +215,6 @@ struct SessionTreeEntry
         ModelChange,
         ActiveToolsChange,
         Compaction,
-        BranchSummary,
-        Custom,
-        CustomMessage,
-        Label,
-        SessionInfo,
-        Leaf,
     };
 
     Type type = Type::Message;
@@ -237,18 +237,6 @@ struct SessionTreeEntry
     int64_t tokensBefore = 0;
     Json details = Json::object();
     bool fromHook = false;
-    // branch_summary
-    std::string fromId;
-    // custom / custom_message
-    std::string customType;
-    bool display = false;
-    // label
-    std::string targetId;
-    std::string label;  // 空串 = undefined
-    // session_info
-    std::string name;
-    // leaf
-    std::string leafTargetId;  // 空串 = null
 };
 
 struct SessionContext
@@ -265,7 +253,6 @@ struct SessionMetadata
     std::string createdAt;
     std::string cwd;
     std::string path;
-    std::string parentSessionPath;
     std::string preview;   // 首个用户消息预览（/sessions 与 --resume 展示用）
     int messageCount = 0;  // 会话消息条数
 };
@@ -292,7 +279,6 @@ struct PromptTemplate
 
 struct CompactionSettings
 {
-    bool enabled = true;
     int64_t reserveTokens = 16384;
     int64_t keepRecentTokens = 20000;
 };

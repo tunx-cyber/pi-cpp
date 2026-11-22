@@ -18,12 +18,6 @@ namespace pi
 // AgentMessage 与 ai 层 Message 同构（pi 的 custom 消息类型裁剪掉）
 using AgentMessage = Message;
 
-enum class QueueMode
-{
-    All,
-    OneAtATime
-};
-
 enum class ToolExecutionMode
 {
     Sequential,
@@ -38,11 +32,6 @@ struct ToolResult
     bool terminate = false;
 };
 
-struct ToolResultMessage
-{
-    Message message;
-};
-
 /**
  * 工具定义，镜像 pi 的 AgentTool。
  * execute 抛异常 = error toolResult（pi 契约）。
@@ -51,18 +40,11 @@ struct AgentTool
 {
     std::string name;
     std::string description;
-    std::string label;
     Json parameters = Json::object();  // JSON Schema
     ToolExecutionMode executionMode = ToolExecutionMode::Parallel;
-    /** 兼容 shim：原始参数 → schema 匹配参数（可选）。 */
-    std::function<Json(const Json&)> prepareArguments;
-    /**
-     * execute(toolCallId, args, abort, onUpdate) → ToolResult。
-     * onUpdate 用于流式部分结果（tool_execution_update）。
-     */
+    /** execute(toolCallId, args, abort) → ToolResult；抛异常 = error toolResult。 */
     std::function<ToolResult(const std::string&, const Json&,
-                             const std::shared_ptr<std::atomic<bool>>&,
-                             const std::function<void(const ToolResult&)>&)>
+                             const std::shared_ptr<std::atomic<bool>>&)>
         execute;
 };
 
@@ -79,18 +61,13 @@ struct AgentEvent
         MessageUpdate,
         MessageEnd,
         ToolExecutionStart,
-        ToolExecutionUpdate,
         ToolExecutionEnd,
     };
 
     Type type = Type::AgentStart;
 
-    // agent_end
-    std::vector<AgentMessage> messages;
-
     // turn_end / message_*
     AgentMessage message;
-    std::vector<Message> toolResults;  // turn_end 的 toolResult 消息
 
     // message_update
     std::optional<StreamEvent> assistantMessageEvent;
@@ -101,26 +78,9 @@ struct AgentEvent
     Json args = Json::object();
     bool isError = false;
     ToolResult result;
-    ToolResult partialResult;
 };
 
 using AgentEventSink = std::function<void(const AgentEvent&)>;
-
-/** beforeToolCall 返回；block=true 阻止执行。 */
-struct BeforeToolCallResult
-{
-    bool block = false;
-    std::string reason;
-};
-
-/** afterToolCall 返回的字段级覆盖。 */
-struct AfterToolCallResult
-{
-    std::optional<std::vector<ContentBlock>> content;
-    std::optional<Json> details;
-    std::optional<bool> isError;
-    std::optional<bool> terminate;
-};
 
 struct AgentContext
 {
@@ -129,37 +89,12 @@ struct AgentContext
     std::vector<AgentTool> tools;
 };
 
-struct BeforeToolCallContext
-{
-    const AgentMessage* assistantMessage;
-    const ContentBlock* toolCall;
-    Json args;
-    const AgentContext* context;
-};
-
-struct AfterToolCallContext
-{
-    const AgentMessage* assistantMessage;
-    const ContentBlock* toolCall;
-    Json args;
-    ToolResult result;
-    bool isError = false;
-    const AgentContext* context;
-};
-
 struct ShouldStopAfterTurnContext
 {
     const AgentMessage* message;
     const std::vector<Message>* toolResults;
     const AgentContext* context;
     const std::vector<AgentMessage>* newMessages;
-};
-
-struct AgentLoopTurnUpdate
-{
-    std::optional<AgentContext> context;
-    std::optional<ModelInfo> model;
-    std::optional<ThinkingLevel> thinkingLevel;
 };
 
 }  // namespace pi

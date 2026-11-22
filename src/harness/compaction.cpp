@@ -131,9 +131,6 @@ bool is_cut_point_entry(const SessionTreeEntry& entry)
             const auto role = entry.message.role;
             return role == Role::User || role == Role::Assistant;
         }
-        case SessionTreeEntry::Type::BranchSummary:
-        case SessionTreeEntry::Type::CustomMessage:
-            return true;
         default:
             return false;
     }
@@ -145,11 +142,6 @@ int find_turn_start_index(const std::vector<SessionTreeEntry>& entries, int entr
     for (int i = entryIndex; i >= startIndex; --i)
     {
         const auto& entry = entries[i];
-        if (entry.type == SessionTreeEntry::Type::BranchSummary ||
-            entry.type == SessionTreeEntry::Type::CustomMessage)
-        {
-            return i;
-        }
         if (entry.type == SessionTreeEntry::Type::Message && entry.message.role == Role::User)
         {
             return i;
@@ -290,13 +282,6 @@ ContextUsageEstimate estimate_context_tokens(const std::vector<AgentMessage>& me
     return result;
 }
 
-bool should_compact(int64_t contextTokens, int64_t contextWindow,
-                    const CompactionSettings& settings)
-{
-    if (!settings.enabled) return false;
-    return contextTokens > contextWindow - settings.reserveTokens;
-}
-
 CutPointResult find_cut_point(const std::vector<SessionTreeEntry>& entries, int startIndex,
                               int endIndex, int64_t keepRecentTokens)
 {
@@ -358,27 +343,6 @@ std::optional<AgentMessage> get_message_from_entry(const SessionTreeEntry& entry
     {
         case SessionTreeEntry::Type::Message:
             return entry.message;
-        case SessionTreeEntry::Type::CustomMessage:
-        {
-            Message message;
-            message.role = Role::User;
-            message.content.push_back(ContentBlock{});
-            message.content.back().type = BlockType::Text;
-            message.content.back().text = entry.message.text_content();
-            return message;
-        }
-        case SessionTreeEntry::Type::BranchSummary:
-        {
-            Message message;
-            message.role = Role::User;
-            message.content.push_back(ContentBlock{});
-            message.content.back().type = BlockType::Text;
-            message.content.back().text =
-                "The following is a summary of a branch that this conversation came back "
-                "from:\n\n<summary>\n" +
-                entry.summary + "</summary>";
-            return message;
-        }
         case SessionTreeEntry::Type::Compaction:
             if (forCompaction) return std::nullopt;
             {

@@ -41,18 +41,6 @@ TEST(CompactionTest, EstimateTokensImageBlock)
     EXPECT_EQ(estimate_tokens(message), 1200);
 }
 
-TEST(CompactionTest, ShouldCompactThreshold)
-{
-    CompactionSettings settings = default_compaction_settings();
-    settings.enabled = true;
-    settings.reserveTokens = 10000;
-    // contextWindow=100000, tokens=90001 > 90000 → compact
-    EXPECT_TRUE(should_compact(90001, 100000, settings));
-    EXPECT_FALSE(should_compact(90000, 100000, settings));
-    settings.enabled = false;
-    EXPECT_FALSE(should_compact(999999, 100000, settings));
-}
-
 TEST(CompactionTest, EstimateContextTokensUsesLastAssistantUsage)
 {
     std::vector<AgentMessage> messages;
@@ -268,9 +256,8 @@ TEST(CompactionTest, GenerateSummarySendsConversationExactlyOnce)
     auto transport = std::make_shared<pi_test::ScriptedTransport>();
     transport->add_turn(pi_test::text_turn("the summary"));
 
-    const auto result =
-        generate_summary(two_message_conversation(), pi_test::scripted_model(), 10000, transport,
-                         "test-key", nullptr);
+    const auto result = generate_summary(two_message_conversation(), pi_test::scripted_model(),
+                                         10000, transport, "test-key", nullptr);
     ASSERT_TRUE(result.ok) << result.error.message;
     EXPECT_EQ(result.value, "the summary");
 
@@ -289,8 +276,9 @@ TEST(CompactionTest, UpdateSummaryIncludesPreviousSummaryOnce)
     auto transport = std::make_shared<pi_test::ScriptedTransport>();
     transport->add_turn(pi_test::text_turn("updated summary"));
 
-    const auto result = generate_summary({Message::user("new message")}, pi_test::scripted_model(),
-                                         10000, transport, "test-key", nullptr, "", "prior summary");
+    const auto result =
+        generate_summary({Message::user("new message")}, pi_test::scripted_model(), 10000,
+                         transport, "test-key", nullptr, "", "prior summary");
     ASSERT_TRUE(result.ok) << result.error.message;
 
     const auto& received = transport->received_messages();

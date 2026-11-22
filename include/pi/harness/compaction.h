@@ -20,7 +20,6 @@ inline constexpr const char* kCompactionSummarySuffix = "\n</summary>";
 inline CompactionSettings default_compaction_settings()
 {
     CompactionSettings settings;
-    settings.enabled = true;
     settings.reserveTokens = 16384;
     settings.keepRecentTokens = 20000;
     return settings;
@@ -42,10 +41,6 @@ struct ContextUsageEstimate
 
 /** 估算消息列表上下文 token（使用最近的 assistant usage）。 */
 ContextUsageEstimate estimate_context_tokens(const std::vector<AgentMessage>& messages);
-
-/** 是否应压缩：enabled && tokens > contextWindow - reserveTokens。 */
-bool should_compact(int64_t contextTokens, int64_t contextWindow,
-                    const CompactionSettings& settings);
 
 struct CutPointResult
 {

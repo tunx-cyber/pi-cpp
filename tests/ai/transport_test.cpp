@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-#include "pi/ai/cost.h"
 #include "pi/ai/events.h"
 #include "pi/ai/model_registry.h"
 #include "pi/ai/openai_transport.h"
@@ -59,8 +58,8 @@ std::string json_delta(std::string content)
 TEST(OpenAiTransportTest, MissingApiKeyIsReportedAsStreamError)
 {
     std::shared_ptr<TransportAdapter> transport;
-    EXPECT_NO_THROW(transport = make_openai_completions_transport(
-                        "http://127.0.0.1:1", "", std::chrono::milliseconds(100)));
+    EXPECT_NO_THROW(transport = make_openai_completions_transport("http://127.0.0.1:1", "",
+                                                                  std::chrono::milliseconds(100)));
     ASSERT_TRUE(transport);
 
     const auto model = *get_model("deepseek-v4-flash");
@@ -124,10 +123,13 @@ TEST_F(TransportTest, StreamsTextAndParsesUsage)
     EXPECT_EQ(events[1].type, StreamEvent::Type::TextStart);
     EXPECT_EQ(events[2].type, StreamEvent::Type::TextDelta);
     EXPECT_EQ(events[2].delta, "Hello");
+    // delta 事件不再携带整条部分消息（否则每个 token 复制一次已累积文本）
+    EXPECT_TRUE(events[2].message.content.empty());
     EXPECT_EQ(events[3].type, StreamEvent::Type::TextDelta);
     EXPECT_EQ(events[3].delta, " world");
     EXPECT_EQ(events[4].type, StreamEvent::Type::TextEnd);
     EXPECT_EQ(events[4].content, "Hello world");
+    EXPECT_EQ(events[4].message.text_content(), "Hello world");
 
     const auto& done = events.back();
     EXPECT_EQ(done.reason, StopReason::Stop);
@@ -140,8 +142,6 @@ TEST_F(TransportTest, StreamsTextAndParsesUsage)
     EXPECT_EQ(done.message.usage.cacheRead, 2);
     EXPECT_EQ(done.message.usage.cacheWrite, 1);
     EXPECT_EQ(done.message.usage.totalTokens, 15);
-    EXPECT_NEAR(done.message.usage.cost.total, calculate_cost(model_, done.message.usage).total,
-                1e-12);
 
     // 请求体断言：model / stream_options.include_usage / system role
     const Json body = Json::parse(server_->last_request_body());
@@ -339,6 +339,25 @@ TEST_F(TransportTest, ReturnsErrorEventOnHttpError)
     EXPECT_EQ(events.back().reason, StopReason::Error);
     EXPECT_EQ(events[0].type, StreamEvent::Type::Start);
     EXPECT_NE(events.back().message.errorMessage.find("bad request"), std::string::npos);
+}
+
+TEST_F(TransportTest, ReportsErrorChunkInsideSuccessfulStream)
+{
+    // 网关/代理会在 200 流里返回 {"error":{...}}：必须转成 Error，而不是"缺少 finish_reason"
+    server_->set_script({
+        pi_test::sse_data("{\"error\":{\"message\":\"quota exceeded\"}}"),
+    });
+
+    EventCollector collector;
+    auto transport = make_transport();
+    transport->stream_chat(model_, {Message::user("hi")}, {},
+                           [&](const StreamEvent& e) { collector.push(e); });
+
+    const auto events = collector.wait_for_end();
+    ASSERT_FALSE(events.empty());
+    ASSERT_EQ(events.back().type, StreamEvent::Type::Error);
+    EXPECT_EQ(events.back().message.stopReason, StopReason::Error);
+    EXPECT_NE(events.back().message.errorMessage.find("quota exceeded"), std::string::npos);
 }
 
 TEST_F(TransportTest, CompleteChatAggregatesMessage)

@@ -18,8 +18,7 @@ class JsonlSessionRepo
    public:
     JsonlSessionRepo(FileSystem& fs, std::string sessionsRoot);
 
-    Result<Session, SessionError> create(
-        const std::string& cwd, const std::optional<std::string>& parentSessionPath = std::nullopt);
+    Result<Session, SessionError> create(const std::string& cwd);
     Result<Session, SessionError> open(const SessionMetadata& metadata);
     Result<std::vector<SessionMetadata>, SessionError> list(
         const std::optional<std::string>& cwd = std::nullopt) const;

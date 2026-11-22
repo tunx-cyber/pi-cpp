@@ -78,6 +78,14 @@ json message_to_json(const ChatMessage& message)
         result["tool_calls"] = std::move(tool_calls);
     }
 
+    // assistant 只有 tool_calls 时显式 content: null（DeepSeek 等端点要求）
+    if (message.role == "assistant" && !result.contains("content") && !message.tool_calls.empty())
+    {
+        result["content"] = nullptr;
+    }
+    // 额外字段（如 reasoning_content）：直接合并，避免 HTTP 层再 parse/dump 整个请求体。
+    for (const auto& [key, value] : message.extra.items()) result[key] = value;
+
     return result;
 }
 
@@ -117,13 +125,6 @@ json build_chat_request_body(const ChatCompletionRequest& request, bool stream)
                 }
                 tool_json["function"] = std::move(fn);
             }
-            if (tool.raw.is_object())
-            {
-                for (auto it = tool.raw.begin(); it != tool.raw.end(); ++it)
-                {
-                    tool_json[it.key()] = it.value();
-                }
-            }
             tools.push_back(std::move(tool_json));
         }
         body["tools"] = std::move(tools);
@@ -140,6 +141,8 @@ json build_chat_request_body(const ChatCompletionRequest& request, bool stream)
         }
         body["stream_options"] = std::move(stream_options);
     }
+
+    for (const auto& [key, value] : request.extra.items()) body[key] = value;
 
     return body;
 }
@@ -218,39 +221,33 @@ OpenAIClient::OpenAIClient(ClientOptions options, std::unique_ptr<HttpClient> ht
 }
 
 HttpResponse OpenAIClient::perform_request(const std::string& method, const std::string& path,
-                                           const std::string& body,
-                                           const RequestOptions& options) const
+                                           std::string body, const RequestOptions& options) const
 {
     const std::size_t max_retries = options.max_retries.value_or(options_.max_retries);
-    std::size_t attempts = 0;
 
+    // 请求对象只构建一次（body 直接 move 进来），重试时复用，不做整包拷贝。
+    HttpRequest http_request;
+    http_request.method = method;
+    http_request.url = build_url(options_.base_url, path);
+    http_request.timeout = options.timeout.value_or(options_.timeout);
+    http_request.on_chunk = options.on_chunk;
+    http_request.collect_body = options.collect_body;
+
+    std::map<std::string, std::string> headers;
+    headers["Accept"] = "application/json";
+    if (!body.empty()) headers["Content-Type"] = "application/json";
+    if (options_.use_bearer_auth && !options_.api_key.empty())
+    {
+        headers["Authorization"] = "Bearer " + options_.api_key;
+    }
+    for (const auto& [key, value] : options_.default_headers) headers[key] = value;
+    for (const auto& [key, value] : options.headers) headers[key] = value;
+    http_request.headers = std::move(headers);
+    http_request.body = std::move(body);
+
+    std::size_t attempts = 0;
     while (true)
     {
-        HttpRequest http_request;
-        http_request.method = method;
-        http_request.url = build_url(options_.base_url, path);
-        http_request.body = body;
-        http_request.timeout = options.timeout.value_or(options_.timeout);
-        http_request.on_chunk = options.on_chunk;
-        http_request.collect_body = options.collect_body;
-
-        std::map<std::string, std::string> headers;
-        headers["Accept"] = "application/json";
-        if (!body.empty()) headers["Content-Type"] = "application/json";
-        if (options_.use_bearer_auth && !options_.api_key.empty())
-        {
-            headers["Authorization"] = "Bearer " + options_.api_key;
-        }
-        for (const auto& [key, value] : options_.default_headers)
-        {
-            headers[key] = value;
-        }
-        for (const auto& [key, value] : options.headers)
-        {
-            headers[key] = value;
-        }
-        http_request.headers = std::move(headers);
-
         HttpResponse response;
         try
         {

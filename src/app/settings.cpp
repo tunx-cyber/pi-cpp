@@ -119,7 +119,7 @@ bool write_settings_json(const std::string& path, const Json& json)
             return false;
         }
     }
-    // Settings contain credentials; do not leave a world-readable file behind.
+    // settings.json 不再保存 apiKey/baseUrl；仍保持 0600，避免旧版本遗留的凭据字段被他人读取。
     if (chmod(temporary.c_str(), 0600) != 0)
     {
         std::remove(temporary.c_str());
@@ -144,10 +144,6 @@ Json model_to_json(const ModelInfo& m)
     j["reasoning"] = m.reasoning;
     j["contextWindow"] = m.contextWindow;
     j["maxTokens"] = m.maxTokens;
-    j["costInput"] = m.costInput;
-    j["costOutput"] = m.costOutput;
-    j["costCacheRead"] = m.costCacheRead;
-    j["costCacheWrite"] = m.costCacheWrite;
     return j;
 }
 
@@ -164,28 +160,21 @@ ModelInfo model_from_json(const Json& j, const std::string& defaultBaseUrl)
     m.input = {"text", "image"};
     m.contextWindow = j.value("contextWindow", 131072LL);
     m.maxTokens = j.value("maxTokens", 32768LL);
-    m.costInput = j.value("costInput", 0.0);
-    m.costOutput = j.value("costOutput", 0.0);
-    m.costCacheRead = j.value("costCacheRead", 0.0);
-    m.costCacheWrite = j.value("costCacheWrite", 0.0);
     return m;
 }
 
 Json settings_json(const Settings& settings, const Json& by_cwd)
 {
     Json json = Json::object();
-    if (!settings.apiKey.empty()) json["apiKey"] = settings.apiKey;
-    json["baseUrl"] = settings.baseUrl;
-    json["model"] = settings.model;
+    // 全局 apiKey / baseUrl 只来自 env 与代码默认值，不写入 settings.json。
+    // model 为空表示"由端点自动确定"，此时不落盘（避免把某次探测结果固化成默认值）。
+    if (!settings.model.empty()) json["model"] = settings.model;
     json["thinking"] = to_string(settings.thinking);
     json["sessionsRoot"] = settings.sessionsRoot;
     json["systemPrompt"] = settings.systemPrompt;
-    if (settings.pricing.input) json["costInput"] = *settings.pricing.input;
-    if (settings.pricing.output) json["costOutput"] = *settings.pricing.output;
-    if (settings.pricing.cacheRead) json["costCacheRead"] = *settings.pricing.cacheRead;
-    if (settings.pricing.cacheWrite) json["costCacheWrite"] = *settings.pricing.cacheWrite;
-    json["compaction"] = Json{{"enabled", settings.compaction.enabled},
-                              {"reserveTokens", settings.compaction.reserveTokens},
+    json["theme"] = settings.theme;
+    // 自动压缩已移除：compaction 仅用于手动 /compact 的切点参数。
+    json["compaction"] = Json{{"reserveTokens", settings.compaction.reserveTokens},
                               {"keepRecentTokens", settings.compaction.keepRecentTokens}};
     json["webSearch"] = Json{{"baseUrl", settings.webSearch.baseUrl},
                              {"model", settings.webSearch.model},
@@ -213,7 +202,9 @@ std::optional<Settings::CwdOverride> Settings::override_for(const std::string& c
     if (it == (*json)["byCwd"].end() || !it->is_object()) return result;
 
     CwdOverride override;
-    if (it->contains("model")) override.model = (*it)["model"].get<std::string>();
+    // 手写配置里的类型错误不应让启动直接抛异常（其余字段都做了类型检查）
+    if (it->contains("model") && (*it)["model"].is_string())
+        override.model = (*it)["model"].get<std::string>();
     if (it->contains("thinking")) override.thinking = thinking_from_json((*it)["thinking"]);
     return override;
 }
@@ -221,18 +212,35 @@ std::optional<Settings::CwdOverride> Settings::override_for(const std::string& c
 Settings Settings::load()
 {
     Settings settings;
+    // .env 文件（优先级：~/.pi-cpp/.env < 当前目录向上最近的项目 .env < 环境变量）。
+    // 从 build/ 目录启动时仍能找到仓库根目录的 .env。
+    const auto env_file = load_env_file(expand_home("~/.pi-cpp/.env"));
+    const auto project_env = load_env_file(find_project_env_file());
+    auto get_env_value = [&](const std::string& key) -> std::string
+    {
+        if (const char* value = std::getenv(key.c_str()); value && *value) return value;
+        if (project_env.count(key)) return project_env.at(key);
+        if (env_file.count(key)) return env_file.at(key);
+        return "";
+    };
+    // apiKey 与全局端点只来自 env 与 settings.h 的默认值。先应用 env，
+    // 让 settings.json 中未显式给 baseUrl 的自定义模型回退到实际端点。
+    const std::string env_key = get_env_value("PI_API_KEY");
+    const std::string deepseek_key = get_env_value("DEEPSEEK_API_KEY");
+    const std::string openai_key = get_env_value("OPENAI_API_KEY");
+    if (!env_key.empty()) settings.apiKey = env_key;
+    if (settings.apiKey.empty() && !deepseek_key.empty()) settings.apiKey = deepseek_key;
+    if (settings.apiKey.empty() && !openai_key.empty()) settings.apiKey = openai_key;
+    const std::string env_base = get_env_value("PI_BASE_URL");
+    if (!env_base.empty()) settings.baseUrl = env_base;
+    const std::string env_model = get_env_value("PI_MODEL");
+
     const std::string path = expand_home("~/.pi-cpp/settings.json");
     const auto json = load_json_file(path);
     if (json)
     {
-        if (json->contains("apiKey") && (*json)["apiKey"].is_string())
-        {
-            settings.apiKey = (*json)["apiKey"].get<std::string>();
-        }
-        if (json->contains("baseUrl") && (*json)["baseUrl"].is_string())
-        {
-            settings.baseUrl = (*json)["baseUrl"].get<std::string>();
-        }
+        // apiKey / baseUrl 不从 settings.json 读取（只认 env 与 settings.h 的默认值）；
+        // 旧文件中的这两个键会被忽略，并在下次 save() 时自然移除。
         if (json->contains("model") && (*json)["model"].is_string())
         {
             settings.model = (*json)["model"].get<std::string>();
@@ -242,19 +250,12 @@ Settings Settings::load()
             if (const auto level = thinking_from_json((*json)["thinking"]))
                 settings.thinking = *level;
         }
-        const auto read_price = [&](const char* key) -> std::optional<double>
-        {
-            if (json->contains(key) && (*json)[key].is_number()) return (*json)[key].get<double>();
-            return std::nullopt;
-        };
-        settings.pricing.input = read_price("costInput");
-        settings.pricing.output = read_price("costOutput");
-        settings.pricing.cacheRead = read_price("costCacheRead");
-        settings.pricing.cacheWrite = read_price("costCacheWrite");
         if (json->contains("sessionsRoot") && (*json)["sessionsRoot"].is_string())
             settings.sessionsRoot = (*json)["sessionsRoot"].get<std::string>();
         if (json->contains("systemPrompt") && (*json)["systemPrompt"].is_string())
             settings.systemPrompt = (*json)["systemPrompt"].get<std::string>();
+        if (json->contains("theme") && (*json)["theme"].is_string())
+            settings.theme = (*json)["theme"].get<std::string>();
         if (json->contains("models") && (*json)["models"].is_array())
         {
             for (const auto& item : (*json)["models"])
@@ -273,8 +274,6 @@ Settings Settings::load()
         if (json->contains("compaction") && (*json)["compaction"].is_object())
         {
             const auto& c = (*json)["compaction"];
-            if (c.contains("enabled") && c["enabled"].is_boolean())
-                settings.compaction.enabled = c["enabled"].get<bool>();
             if (c.contains("reserveTokens") && c["reserveTokens"].is_number())
                 settings.compaction.reserveTokens = c["reserveTokens"].get<int64_t>();
             if (c.contains("keepRecentTokens") && c["keepRecentTokens"].is_number())
@@ -295,27 +294,7 @@ Settings Settings::load()
                 settings.webSearch.maxResults = w["maxResults"].get<int>();
         }
     }
-    // .env 文件（优先级：~/.pi-cpp/.env < 当前目录向上最近的项目 .env < 环境变量）。
-    // 从 build/ 目录启动时仍能找到仓库根目录的 .env。
-    const auto env_file = load_env_file(expand_home("~/.pi-cpp/.env"));
-    const auto project_env = load_env_file(find_project_env_file());
-    auto get_env_value = [&](const std::string& key) -> std::string
-    {
-        if (const char* value = std::getenv(key.c_str()); value && *value) return value;
-        if (project_env.count(key)) return project_env.at(key);
-        if (env_file.count(key)) return env_file.at(key);
-        return "";
-    };
-    const std::string env_key = get_env_value("PI_API_KEY");
-    const std::string deepseek_key = get_env_value("DEEPSEEK_API_KEY");
-    const std::string openai_key = get_env_value("OPENAI_API_KEY");
-    if (!env_key.empty()) settings.apiKey = env_key;
-    if (settings.apiKey.empty() && !deepseek_key.empty()) settings.apiKey = deepseek_key;
-    if (settings.apiKey.empty() && !openai_key.empty()) settings.apiKey = openai_key;
-    // env 覆盖端点与模型（便于切换/测试）
-    const std::string env_base = get_env_value("PI_BASE_URL");
-    if (!env_base.empty()) settings.baseUrl = env_base;
-    const std::string env_model = get_env_value("PI_MODEL");
+    // 模型也允许 env 覆盖 settings.json（便于切换/测试）
     if (!env_model.empty()) settings.model = env_model;
     return settings;
 }

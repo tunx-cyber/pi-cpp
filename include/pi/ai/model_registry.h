@@ -24,11 +24,18 @@ std::vector<std::string> get_providers();
 /** Models for one provider. */
 std::vector<ModelInfo> get_models(const std::string& provider);
 
-/** Thinking levels supported by a model, mirroring pi's getSupportedThinkingLevels. */
-std::vector<ThinkingLevel> get_supported_thinking_levels(const ModelInfo& model);
-
-/** Clamp a requested thinking level to the nearest supported one, mirroring pi. */
-ThinkingLevel clamp_thinking_level(const ModelInfo& model, ThinkingLevel level);
+/**
+ * 为注册表里没有的模型 id 推断能力模板（reasoning / thinkingLevelMap / 上下文窗口等）。
+ *
+ * `GET /models` 只返回 id，不带能力信息；若直接把远端模型当成纯文本模型，
+ * 支持思考的模型（如 deepseek-flash）会被错误地限制为 thinking=off。
+ * 匹配顺序：
+ *   1. id 前缀与已注册模型的 provider 一致（deepseek-flash → deepseek）；
+ *   2. 端点 host 与已注册模型一致（同一个服务商）。
+ * 找不到返回 nullopt，调用方应使用保守默认值（不支持思考、较小上下文窗口）。
+ */
+std::optional<ModelInfo> find_model_template(const std::string& modelId,
+                                             const std::string& baseUrl);
 
 /** Equality by id + provider. */
 bool models_are_equal(const ModelInfo& a, const ModelInfo& b);

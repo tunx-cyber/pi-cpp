@@ -138,17 +138,7 @@ struct ContentBlock
     std::string thoughtSignature;
 };
 
-/** Cost in CNY (人民币), mirroring pi's Usage.cost. */
-struct Cost
-{
-    double input = 0;
-    double output = 0;
-    double cacheRead = 0;
-    double cacheWrite = 0;
-    double total = 0;
-};
-
-/** Token usage mirroring pi's Usage. */
+/** Token usage mirroring pi's Usage（不含金额：单价随时变动，只记录 token 数量）。 */
 struct Usage
 {
     int64_t input = 0;
@@ -156,7 +146,6 @@ struct Usage
     int64_t cacheRead = 0;
     int64_t cacheWrite = 0;
     int64_t totalTokens = 0;
-    Cost cost;
 };
 
 /**

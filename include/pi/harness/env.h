@@ -24,6 +24,8 @@ class PosixFileSystem : public FileSystem
     Result<std::string, FileError> read_text_file(const std::string& path) override;
     Result<std::vector<std::string>, FileError> read_text_lines(const std::string& path,
                                                                 int maxLines) override;
+    Result<void, FileError> for_each_line(
+        const std::string& path, const std::function<bool(const std::string&)>& callback) override;
     Result<void, FileError> write_file(const std::string& path,
                                        const std::string& content) override;
     Result<void, FileError> append_file(const std::string& path,

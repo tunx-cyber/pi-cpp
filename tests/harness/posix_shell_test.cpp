@@ -50,6 +50,17 @@ TEST(PosixShellTest, TimeoutClosesPipes)
     EXPECT_EQ(count_open_descriptors(), before);
 }
 
+TEST(PosixShellTest, TruncatesOutputAtConfiguredLimit)
+{
+    PosixShell shell;
+    ExecOptions options;
+    options.maxOutputBytes = 1024;
+    const auto result = shell.exec("yes | head -c 200000", options);
+    ASSERT_TRUE(result.ok) << result.error.message;
+    EXPECT_LE(result.value.stdout.size(), 1024u);
+    EXPECT_GT(result.value.truncatedBytes, 0u);
+}
+
 TEST(PosixShellTest, InvalidWorkingDirectoryDoesNotExecuteCommand)
 {
     PosixShell shell;

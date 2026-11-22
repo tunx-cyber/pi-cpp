@@ -6,15 +6,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
-#include <cstdlib>
-#include <fstream>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <set>
@@ -37,12 +37,10 @@ AgentTool make_tool(
     AgentTool tool;
     tool.name = std::move(name);
     tool.description = std::move(description);
-    tool.label = tool.name;
     tool.parameters = std::move(parameters);
     tool.execute = [execute = std::move(execute)](
                        const std::string&, const Json& args,
-                       const std::shared_ptr<std::atomic<bool>>& signal,
-                       const std::function<void(const ToolResult&)>&) -> ToolResult
+                       const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
     { return execute(args, signal); };
     return tool;
 }
@@ -102,11 +100,10 @@ std::optional<std::string> workspace_path(const std::string& cwd, const std::str
     const auto root = std::filesystem::weakly_canonical(workspace_root, ec);
     if (ec) return std::nullopt;
     const auto input = std::filesystem::path(requested);
-    const bool explicit_parent = !input.is_absolute() && !input.empty() &&
-                                 (*input.begin() == std::filesystem::path(".."));
-    const auto candidate = input.is_absolute()
-                               ? input
-                               : (explicit_parent ? working_dir : root) / input;
+    const bool explicit_parent =
+        !input.is_absolute() && !input.empty() && (*input.begin() == std::filesystem::path(".."));
+    const auto candidate =
+        input.is_absolute() ? input : (explicit_parent ? working_dir : root) / input;
     auto canonical = std::filesystem::weakly_canonical(candidate, ec);
     if (ec)
     {
@@ -301,13 +298,13 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
     Json body;
     body["model"] = config.model;
     body["max_tokens"] = config.maxTokens;
-    body["messages"] = Json::array({Json{
-        {"role", "user"},
-        {"content", Json::array({Json{{"type", "text"},
-                                       {"text", "Perform a web search for the query: " + query}}})}}});
-    body["tools"] = Json::array({Json{{"type", "web_search_20250305"},
-                                      {"name", "web_search"},
-                                      {"max_uses", config.maxUses}}});
+    body["messages"] = Json::array(
+        {Json{{"role", "user"},
+              {"content",
+               Json::array({Json{{"type", "text"},
+                                 {"text", "Perform a web search for the query: " + query}}})}}});
+    body["tools"] = Json::array({Json{
+        {"type", "web_search_20250305"}, {"name", "web_search"}, {"max_uses", config.maxUses}}});
     const std::string body_json = body.dump();
 
     CURL* curl = curl_easy_init();
@@ -367,7 +364,8 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
             std::string detail;
             if (err.contains("error"))
             {
-                if (err["error"].is_string()) detail = err["error"].get<std::string>();
+                if (err["error"].is_string())
+                    detail = err["error"].get<std::string>();
                 else if (err["error"].is_object() && err["error"].contains("message") &&
                          err["error"]["message"].is_string())
                     detail = err["error"]["message"].get<std::string>();
@@ -535,7 +533,8 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
                                  {"maxLines", Json{{"type", "integer"},
                                                    {"description", "Cap on lines returned"}}}}},
              {"required", Json::array({"path"})}},
-        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+        [cwd, workspace](const Json& args,
+                         const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
             const auto resolved = workspace_path(cwd, args.value("path", ""), false, workspace);
             const std::string path = resolved.value_or("");
@@ -580,24 +579,28 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
                    {"cwd", Json{{"type", "string"},
                                 {"description", "Working directory (defaults to session cwd)"}}}}},
              {"required", Json::array({"command"})}},
-        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+        [cwd, workspace](const Json& args,
+                         const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
             ToolResult result;
             PosixShell shell;
             ExecOptions options;
             const auto working_dir = workspace_path(
-                cwd, args.contains("cwd") ? args["cwd"].get<std::string>() : workspace,
-                false, workspace);
+                cwd, args.contains("cwd") ? args["cwd"].get<std::string>() : workspace, false,
+                workspace);
             if (!working_dir || !std::filesystem::is_directory(*working_dir))
             {
                 result.content.push_back(ContentBlock{});
                 result.content.back().type = BlockType::Text;
-                result.content.back().text = "[bash error] working directory must stay inside the workspace";
+                result.content.back().text =
+                    "[bash error] working directory must stay inside the workspace";
                 return result;
             }
             options.cwd = *working_dir;
             options.abort = signal;
             options.timeoutSeconds = 120;
+            // 单条命令最多保留 256 KiB：`yes` / 大文件 cat 等不能让进程内存无界增长。
+            options.maxOutputBytes = 256 * 1024;
             const auto executed = shell.exec(args.value("command", ""), options);
             std::string text;
             if (!executed.ok)
@@ -610,6 +613,10 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
                 if (!executed.value.stderr.empty()) text += "\n[stderr]\n" + executed.value.stderr;
                 if (executed.value.exitCode != 0)
                     text += "\n[exit code " + std::to_string(executed.value.exitCode) + "]";
+                if (executed.value.truncatedBytes > 0)
+                    text +=
+                        "\n[output truncated: " + std::to_string(executed.value.truncatedBytes) +
+                        " bytes dropped]";
             }
             result.content.push_back(ContentBlock{});
             result.content.back().type = BlockType::Text;
@@ -727,9 +734,11 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
                                                {"description", "File or directory to search"}}},
                                  {"maxResults", Json{{"type", "integer"}}}}},
              {"required", Json::array({"pattern"})}},
-        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+        [cwd, workspace](const Json& args,
+                         const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
-            const auto resolved = workspace_path(cwd, args.value("path", workspace), false, workspace);
+            const auto resolved =
+                workspace_path(cwd, args.value("path", workspace), false, workspace);
             const std::string path = resolved.value_or("");
             const std::string pattern = args.value("pattern", "");
             const int max_results =
@@ -818,9 +827,11 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
              {"properties",
               Json{{"path", Json{{"type", "string"}}}, {"maxResults", Json{{"type", "integer"}}}}},
              {"required", Json::array()}},
-        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
+        [cwd, workspace](const Json& args,
+                         const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
-            const auto resolved = workspace_path(cwd, args.value("path", workspace), false, workspace);
+            const auto resolved =
+                workspace_path(cwd, args.value("path", workspace), false, workspace);
             const std::string path = resolved.value_or("");
             const int max_results =
                 args.contains("maxResults") ? args["maxResults"].get<int>() : 100;
@@ -858,55 +869,54 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
             return result;
         }));
 
-    tools.push_back(
-        make_tool("ls", "List directory contents.",
-                  Json{{"type", "object"},
-                       {"properties", Json{{"path", Json{{"type", "string"}}}}},
-                       {"required", Json::array()}},
-                  [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
-                  {
-                      const auto resolved = workspace_path(cwd, args.value("path", workspace), false,
-                                                           workspace);
-                      const std::string path = resolved.value_or("");
-                      ToolResult result;
-                      DIR* d = opendir(path.c_str());
-                      if (!d)
-                      {
-                          result.content.push_back(ContentBlock{});
-                          result.content.back().type = BlockType::Text;
-                          result.content.back().text = "Error: cannot list " + path;
-                          return result;
-                      }
-                      std::vector<std::string> names;
-                      struct dirent* entry;
-                      while ((entry = readdir(d)) != nullptr)
-                      {
-                          const std::string name = entry->d_name;
-                          if (name == "." || name == "..") continue;
-                          names.push_back(name);
-                      }
-                      closedir(d);
-                      std::sort(names.begin(), names.end());
-                      std::string text = join_lines(names, names.size());
-                      result.content.push_back(ContentBlock{});
-                      result.content.back().type = BlockType::Text;
-                      result.content.back().text = text.empty() ? "(empty directory)" : text;
-                      return result;
-                  }));
+    tools.push_back(make_tool(
+        "ls", "List directory contents.",
+        Json{{"type", "object"},
+             {"properties", Json{{"path", Json{{"type", "string"}}}}},
+             {"required", Json::array()}},
+        [cwd, workspace](const Json& args, const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
+        {
+            const auto resolved =
+                workspace_path(cwd, args.value("path", workspace), false, workspace);
+            const std::string path = resolved.value_or("");
+            ToolResult result;
+            DIR* d = opendir(path.c_str());
+            if (!d)
+            {
+                result.content.push_back(ContentBlock{});
+                result.content.back().type = BlockType::Text;
+                result.content.back().text = "Error: cannot list " + path;
+                return result;
+            }
+            std::vector<std::string> names;
+            struct dirent* entry;
+            while ((entry = readdir(d)) != nullptr)
+            {
+                const std::string name = entry->d_name;
+                if (name == "." || name == "..") continue;
+                names.push_back(name);
+            }
+            closedir(d);
+            std::sort(names.begin(), names.end());
+            std::string text = join_lines(names, names.size());
+            result.content.push_back(ContentBlock{});
+            result.content.back().type = BlockType::Text;
+            result.content.back().text = text.empty() ? "(empty directory)" : text;
+            return result;
+        }));
 
     tools.push_back(make_tool(
         "web_fetch", "Fetch a web page by URL and return its content as text.",
         Json{{"type", "object"},
              {"properties",
-              Json{{"url", Json{{"type", "string"},
-                                {"description", "Full http(s) URL to fetch"}}},
+              Json{{"url", Json{{"type", "string"}, {"description", "Full http(s) URL to fetch"}}},
                    {"max_chars", Json{{"type", "integer"},
                                       {"description",
                                        "Maximum characters to return (UTF-8 safe, default 20000, "
                                        "max 100000)"}}},
-                   {"timeout_seconds", Json{{"type", "integer"},
-                                            {"description",
-                                             "Timeout in seconds (default 15, max 60)"}}}}},
+                   {"timeout_seconds",
+                    Json{{"type", "integer"},
+                         {"description", "Timeout in seconds (default 15, max 60)"}}}}},
              {"required", Json::array({"url"})}},
         [](const Json& args, const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
         {
@@ -982,8 +992,7 @@ std::vector<AgentTool> make_coding_tools(const std::string& cwd, const std::stri
             {
                 result.content.push_back(ContentBlock{});
                 result.content.back().type = BlockType::Text;
-                result.content.back().text =
-                    "[web_search error] query must be a non-empty string";
+                result.content.back().text = "[web_search error] query must be a non-empty string";
                 return result;
             }
             const auto search = deepseek_web_search(query, apiKey, signal, searchConfig);

@@ -119,6 +119,23 @@ Result<std::vector<std::string>, FileError> PosixFileSystem::read_text_lines(
     return Result<std::vector<std::string>, FileError>::ok_value(std::move(lines));
 }
 
+Result<void, FileError> PosixFileSystem::for_each_line(
+    const std::string& path, const std::function<bool(const std::string&)>& callback)
+{
+    const std::string resolved = resolve(path);
+    std::ifstream file(resolved);
+    if (!file)
+        return Result<void, FileError>::err_value(make_file_error(
+            FileErrorCode::NotFound, "Failed to read file: " + errno_message(), resolved));
+    std::string line;
+    while (std::getline(file, line))
+    {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!callback(line)) break;
+    }
+    return Result<void, FileError>::ok_value();
+}
+
 Result<void, FileError> PosixFileSystem::write_file(const std::string& path,
                                                     const std::string& content)
 {

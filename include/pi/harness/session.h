@@ -21,13 +21,12 @@ SessionTreeEntry session_entry_from_json(const Json& json, const std::string& fi
 std::string iso_timestamp();
 
 /**
- * JSONL 会话存储：append-only，version-3 头部，leaf 跟踪。
- * 镜像 pi 的 JsonlSessionStorage。
+ * JSONL 会话存储：append-only，version-3 头部，线性历史（不支持 branch/fork）。
  *
  * 线程安全：REPL 中 run 线程（消息持久化）与 UI 线程（/model、/thinking、
  * /tools 等切换命令）会并发访问同一存储，所有公开方法均由 mutex_ 保护。
- * append_child 在单次加锁内完成「生成 id → 挂到当前 leaf → 落盘」，
- * 保证并发追加时历史链保持线性、不会产生孤儿分支。
+ * append_child 在单次加锁内完成「生成 id → 挂到末尾 → 落盘」，
+ * 保证并发追加时历史链保持线性。
  */
 class JsonlSessionStorage
 {
@@ -35,8 +34,7 @@ class JsonlSessionStorage
     static Result<JsonlSessionStorage, SessionError> open(FileSystem& fs, const std::string& path);
     static Result<JsonlSessionStorage, SessionError> create(FileSystem& fs, const std::string& path,
                                                             const std::string& cwd,
-                                                            const std::string& sessionId,
-                                                            const std::string& parentSessionPath);
+                                                            const std::string& sessionId);
 
     SessionMetadata metadata() const { return metadata_; }
 
@@ -48,16 +46,9 @@ class JsonlSessionStorage
     JsonlSessionStorage(const JsonlSessionStorage&) = delete;
     JsonlSessionStorage& operator=(const JsonlSessionStorage&) = delete;
 
-    Result<std::string, SessionError> get_leaf_id() const;  // 空串 = null
-    Result<void, SessionError> set_leaf_id(const std::string& leafId);
-    std::string create_entry_id();
-    Result<void, SessionError> append_entry(SessionTreeEntry entry);
-    /** 以当前 leaf 为父节点原子追加条目（自动分配 id/parentId/timestamp），返回新条目 id。 */
+    Result<std::string, SessionError> get_leaf_id() const;  // 空串 = 无条目
+    /** 以当前末尾为父节点原子追加条目（自动分配 id/parentId/timestamp），返回新条目 id。 */
     Result<std::string, SessionError> append_child(SessionTreeEntry entry);
-    Result<std::optional<SessionTreeEntry>, SessionError> get_entry(const std::string& id) const;
-    Result<std::vector<SessionTreeEntry>, SessionError> find_entries(
-        SessionTreeEntry::Type type) const;
-    Result<std::optional<std::string>, SessionError> get_label(const std::string& id) const;
     Result<std::vector<SessionTreeEntry>, SessionError> get_path_to_root(
         const std::string& leafId) const;
     Result<std::vector<SessionTreeEntry>, SessionError> get_entries() const;
@@ -72,11 +63,10 @@ class JsonlSessionStorage
     mutable std::mutex mutex_;
     std::vector<SessionTreeEntry> entries_;
     std::map<std::string, size_t> by_id_;
-    std::map<std::string, std::string> labels_by_id_;
     std::string current_leaf_id_;
 };
 
-/** 会话：append 各类条目 + build_context 重放，镜像 pi 的 Session。 */
+/** 会话：append 各类条目 + build_context 重放（线性历史，无分支/标注）。 */
 class Session
 {
    public:
@@ -84,14 +74,10 @@ class Session
     explicit Session(std::shared_ptr<JsonlSessionStorage> storage) : storage_(std::move(storage)) {}
 
     SessionMetadata metadata() const;
-    Result<std::string, SessionError> get_leaf_id() const;
     Result<std::vector<SessionTreeEntry>, SessionError> get_entries() const;
-    Result<std::optional<SessionTreeEntry>, SessionError> get_entry(const std::string& id) const;
     Result<std::vector<SessionTreeEntry>, SessionError> get_branch(
         const std::string& fromId = "") const;
     Result<SessionContext, SessionError> build_context() const;
-    Result<std::optional<std::string>, SessionError> get_label(const std::string& id) const;
-    Result<std::optional<std::string>, SessionError> get_session_name() const;
 
     Result<std::string, SessionError> append_message(const AgentMessage& message);
     Result<std::string, SessionError> append_thinking_level_change(const std::string& level);
@@ -103,16 +89,6 @@ class Session
                                                         const std::string& firstKeptEntryId,
                                                         int64_t tokensBefore, const Json& details,
                                                         bool fromHook);
-    Result<std::string, SessionError> append_custom_entry(const std::string& customType,
-                                                          const Json& data);
-    Result<std::string, SessionError> append_custom_message_entry(const std::string& customType,
-                                                                  const std::string& content,
-                                                                  bool display);
-    Result<std::string, SessionError> append_label(const std::string& targetId,
-                                                   const std::string& label);
-    Result<std::string, SessionError> append_session_name(const std::string& name);
-    Result<std::optional<std::string>, SessionError> move_to(
-        const std::string& entryId, const std::optional<std::string>& summary);
 
    private:
     Result<std::string, SessionError> append_typed_entry(SessionTreeEntry entry);

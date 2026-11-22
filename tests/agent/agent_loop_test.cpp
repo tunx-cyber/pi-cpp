@@ -60,13 +60,11 @@ AgentTool make_tool(std::string name)
     AgentTool tool;
     tool.name = name;
     tool.description = "test tool " + name;
-    tool.label = name;
     tool.parameters = Json{{"type", "object"},
                            {"properties", Json{{"command", Json{{"type", "string"}}}}},
                            {"required", Json::array({"command"})}};
     tool.execute = [name](const std::string&, const Json& args,
-                          const std::shared_ptr<std::atomic<bool>>&,
-                          const std::function<void(const ToolResult&)>&) -> ToolResult
+                          const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     {
         ToolResult result;
         result.content.push_back(text_block(name + " executed: " + args.value("command", "")));
@@ -168,8 +166,7 @@ TEST(AgentLoopTest, ToolThrowProducesErrorToolResult)
 {
     AgentTool throwing_tool = make_tool("bash");
     throwing_tool.execute = [](const std::string&, const Json&,
-                               const std::shared_ptr<std::atomic<bool>>&,
-                               const std::function<void(const ToolResult&)>&) -> ToolResult
+                               const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     { throw std::runtime_error("boom"); };
     LoopHarness harness({throwing_tool});
     harness.transport->add_turn(
@@ -235,8 +232,7 @@ TEST(AgentLoopTest, TerminateSemantics)
 {
     AgentTool terminating_tool = make_tool("bash");
     terminating_tool.execute = [](const std::string&, const Json&,
-                                  const std::shared_ptr<std::atomic<bool>>&,
-                                  const std::function<void(const ToolResult&)>&) -> ToolResult
+                                  const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     {
         ToolResult result;
         result.content.push_back(text_block("done"));
@@ -258,8 +254,7 @@ TEST(AgentLoopTest, TerminateRequiresAllResults)
 {
     AgentTool terminating_tool = make_tool("bash");
     terminating_tool.execute = [](const std::string&, const Json&,
-                                  const std::shared_ptr<std::atomic<bool>>&,
-                                  const std::function<void(const ToolResult&)>&) -> ToolResult
+                                  const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     {
         ToolResult result;
         result.content.push_back(text_block("done"));
@@ -284,8 +279,8 @@ TEST(AgentLoopTest, ParallelToolsRunConcurrently)
     std::atomic<int> active{0};
     std::atomic<int> max_active{0};
     AgentTool tool = make_tool("slow");
-    tool.execute = [&](const std::string&, const Json&, const std::shared_ptr<std::atomic<bool>>&,
-                       const std::function<void(const ToolResult&)>&) -> ToolResult
+    tool.execute = [&](const std::string&, const Json&,
+                       const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     {
         const int now = active.fetch_add(1) + 1;
         int expected = max_active.load();
@@ -320,40 +315,6 @@ TEST(AgentLoopTest, ParallelToolsRunConcurrently)
     EXPECT_EQ(tool_results, 5u);
 }
 
-TEST(AgentLoopTest, SequentialModeRunsOneAtATime)
-{
-    std::atomic<int> active{0};
-    std::atomic<int> max_active{0};
-    AgentTool tool = make_tool("slow");
-    tool.execute = [&](const std::string&, const Json&, const std::shared_ptr<std::atomic<bool>>&,
-                       const std::function<void(const ToolResult&)>&) -> ToolResult
-    {
-        const int now = active.fetch_add(1) + 1;
-        int expected = max_active.load();
-        while (now > expected && !max_active.compare_exchange_weak(expected, now))
-        {
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        active.fetch_sub(1);
-        ToolResult result;
-        result.content.push_back(text_block("done"));
-        return result;
-    };
-    LoopHarness harness({tool});
-    harness.config.toolExecution = ToolExecutionMode::Sequential;
-    std::vector<ContentBlock> calls;
-    for (int i = 0; i < 3; ++i)
-    {
-        calls.push_back(tool_call_block("c" + std::to_string(i), "slow", Json{{"command", "x"}}));
-    }
-    harness.transport->add_turn(tool_turn(std::move(calls)));
-    harness.transport->add_turn(text_turn("ok"));
-
-    harness.run({Message::user("go")});
-
-    EXPECT_EQ(max_active.load(), 1);
-}
-
 TEST(AgentLoopTest, SteeringMessagesInjectedBeforeNextTurn)
 {
     LoopHarness harness({make_tool("bash")});
@@ -383,25 +344,6 @@ TEST(AgentLoopTest, SteeringMessagesInjectedBeforeNextTurn)
     EXPECT_TRUE(saw_steer);
 }
 
-TEST(AgentLoopTest, FollowUpRunsAfterAgentWouldStop)
-{
-    LoopHarness harness;
-    harness.config.getFollowUpMessages = [&]() -> std::vector<AgentMessage>
-    {
-        static int count = 0;
-        if (count++ == 0) return {Message::user("follow up")};
-        return {};
-    };
-    harness.transport->add_turn(text_turn("first"));
-    harness.transport->add_turn(text_turn("second"));
-
-    harness.run({Message::user("hi")});
-
-    EXPECT_EQ(harness.transport->received_messages().size(), 2u);
-    ASSERT_EQ(harness.context.messages.size(), 4u);
-    EXPECT_EQ(harness.context.messages[2].text_content(), "follow up");
-}
-
 TEST(AgentLoopTest, ErrorStopReasonEndsLoop)
 {
     LoopHarness harness;
@@ -425,58 +367,6 @@ TEST(AgentLoopTest, ErrorStopReasonEndsLoop)
     EXPECT_EQ(harness.transport->received_messages().size(), 1u);
     EXPECT_EQ(harness.event_types.back(), AgentEvent::Type::AgentEnd);
     // 错误回合后不再有后续 LLM 调用
-}
-
-TEST(AgentLoopTest, BeforeToolCallBlockPreventsExecution)
-{
-    bool executed = false;
-    AgentTool tool = make_tool("bash");
-    tool.execute = [&](const std::string&, const Json&, const std::shared_ptr<std::atomic<bool>>&,
-                       const std::function<void(const ToolResult&)>&) -> ToolResult
-    {
-        executed = true;
-        ToolResult result;
-        result.content.push_back(text_block("ran"));
-        return result;
-    };
-    LoopHarness harness({tool});
-    harness.config.beforeToolCall =
-        [](const BeforeToolCallContext&,
-           const std::shared_ptr<std::atomic<bool>>&) -> BeforeToolCallResult
-    { return {true, "blocked by policy"}; };
-    harness.transport->add_turn(
-        tool_turn({tool_call_block("call_1", "bash", Json{{"command", "ls"}})}));
-    harness.transport->add_turn(text_turn("ok"));
-
-    harness.run({Message::user("go")});
-
-    EXPECT_FALSE(executed);
-    const auto& messages = harness.context.messages;
-    ASSERT_GE(messages.size(), 3u);
-    EXPECT_TRUE(messages[2].isError);
-    EXPECT_EQ(messages[2].text_content(), "blocked by policy");
-}
-
-TEST(AgentLoopTest, AfterToolCallOverridesResult)
-{
-    LoopHarness harness({make_tool("bash")});
-    harness.config.afterToolCall =
-        [](const AfterToolCallContext&,
-           const std::shared_ptr<std::atomic<bool>>&) -> AfterToolCallResult
-    {
-        AfterToolCallResult result;
-        result.content = std::vector<ContentBlock>{text_block("overridden")};
-        return result;
-    };
-    harness.transport->add_turn(
-        tool_turn({tool_call_block("call_1", "bash", Json{{"command", "ls"}})}));
-    harness.transport->add_turn(text_turn("ok"));
-
-    harness.run({Message::user("go")});
-
-    const auto& messages = harness.context.messages;
-    ASSERT_GE(messages.size(), 3u);
-    EXPECT_EQ(messages[2].text_content(), "overridden");
 }
 
 TEST(AgentLoopTest, ShouldStopAfterTurnExitsEarly)
@@ -507,7 +397,6 @@ TEST(AgentTest, PromptThrowsWhenBusy)
     // 同步执行时无法重入，验证 busy 状态与 reset
     agent.prompt("hi");
     EXPECT_FALSE(agent.is_busy());
-    EXPECT_TRUE(agent.is_streaming() == false);
     EXPECT_EQ(agent.messages().size(), 2u);
     agent.reset();
     EXPECT_TRUE(agent.messages().empty());
@@ -519,8 +408,7 @@ TEST(AgentTest, SteerInjectsMessageAndAbortWorks)
     // 回合1：工具调用 → 回合2：文本（steer 消息会在回合2前注入）
     AgentTool tool = make_tool("bash");
     tool.execute = [](const std::string&, const Json& args,
-                      const std::shared_ptr<std::atomic<bool>>& signal,
-                      const std::function<void(const ToolResult&)>&) -> ToolResult
+                      const std::shared_ptr<std::atomic<bool>>& signal) -> ToolResult
     {
         // 工具执行期间让 steer 有机会落点
         for (int i = 0; i < 10; ++i)
@@ -559,44 +447,19 @@ TEST(AgentTest, SteerInjectsMessageAndAbortWorks)
     EXPECT_TRUE(saw_steer);
 }
 
-TEST(AgentTest, ContinueFromAssistantWithQueuedMessages)
-{
-    auto transport = std::make_shared<ScriptedTransport>();
-    transport->add_turn(text_turn("first"));
-    transport->add_turn(text_turn("second"));
-    AgentOptions options;
-    options.model = scripted_model();
-    options.transport = transport;
-    Agent agent(options);
-    agent.prompt("hi");
-    ASSERT_EQ(agent.messages().size(), 2u);
-    EXPECT_EQ(agent.messages().back().role, Role::Assistant);
-
-    agent.follow_up(Message::user("follow"));
-    agent.continue_run();
-    EXPECT_EQ(agent.messages().size(), 4u);
-}
-
-TEST(AgentLoopTest, WorkerCountIsBoundedAndAfterHooksRunOnCallerThread)
+TEST(AgentLoopTest, WorkerCountIsBounded)
 {
     std::mutex mutex;
     std::set<std::thread::id> worker_ids;
     auto tool = make_tool("work");
-    tool.execute = [&](const std::string&, const Json&, const auto&, const auto&)
+    tool.execute = [&](const std::string&, const Json&,
+                       const std::shared_ptr<std::atomic<bool>>&) -> ToolResult
     {
         std::lock_guard<std::mutex> lock(mutex);
         worker_ids.insert(std::this_thread::get_id());
         return ToolResult{};
     };
     LoopHarness harness({tool});
-    const auto caller = std::this_thread::get_id();
-    int hooks = 0;
-    harness.config.afterToolCall = [&](const AfterToolCallContext&, const auto&)
-    {
-        EXPECT_EQ(std::this_thread::get_id(), caller);
-        ++hooks;
-        return AfterToolCallResult{};
-    };
     std::vector<ContentBlock> calls;
     for (int i = 0; i < 64; ++i)
         calls.push_back(tool_call_block(std::to_string(i), "work", Json{{"command", "run"}}));
@@ -604,7 +467,6 @@ TEST(AgentLoopTest, WorkerCountIsBoundedAndAfterHooksRunOnCallerThread)
     harness.transport->add_turn(text_turn("done"));
     harness.run({Message::user("go")});
     EXPECT_LE(worker_ids.size(), 8u);
-    EXPECT_EQ(hooks, 64);
     for (int i = 0; i < 64; ++i)
         EXPECT_EQ(harness.context.messages[static_cast<size_t>(i) + 2].toolCallId,
                   std::to_string(i));
@@ -623,8 +485,6 @@ TEST(AgentTest, ThrowingSubscriberDoesNotPreventOtherSubscribersOrIdleCleanup)
     EXPECT_THROW(agent.prompt("hello"), std::runtime_error);
     EXPECT_GT(notified, 0);
     EXPECT_FALSE(agent.is_busy());
-    EXPECT_FALSE(agent.is_streaming());
-    EXPECT_EQ(agent.error_message(), "subscriber failed");
     agent.wait_for_idle();
     unsubscribe();
     EXPECT_NO_THROW(agent.prompt("retry"));
