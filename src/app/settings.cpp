@@ -179,7 +179,6 @@ Json settings_json(const Settings& settings, const Json& by_cwd)
     json["webSearch"] = Json{{"baseUrl", settings.webSearch.baseUrl},
                              {"model", settings.webSearch.model},
                              {"maxTokens", settings.webSearch.maxTokens},
-                             {"maxUses", settings.webSearch.maxUses},
                              {"maxResults", settings.webSearch.maxResults}};
     if (!settings.models.empty())
     {
@@ -288,8 +287,6 @@ Settings Settings::load()
                 settings.webSearch.model = w["model"].get<std::string>();
             if (w.contains("maxTokens") && w["maxTokens"].is_number())
                 settings.webSearch.maxTokens = w["maxTokens"].get<int>();
-            if (w.contains("maxUses") && w["maxUses"].is_number())
-                settings.webSearch.maxUses = w["maxUses"].get<int>();
             if (w.contains("maxResults") && w["maxResults"].is_number())
                 settings.webSearch.maxResults = w["maxResults"].get<int>();
         }

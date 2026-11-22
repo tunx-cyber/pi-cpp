@@ -9,7 +9,7 @@
 #include <optional>
 #include <set>
 
-#include "curl_http_client.h"
+#include "pi/ai/curl_http_client.h"
 #include "pi/ai/json_util.h"
 #include "pi/ai/openai_mini.h"
 

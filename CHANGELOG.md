@@ -2,12 +2,42 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式（无版本号，按日期记录）。
 
+## 2026-11-22（日）web_search 改用联网工具（deepseek_web_search）
+
+### 变更
+
+- **换成官方联网工具**：`web_search` 的嵌套 Messages 请求声明 `{"type": "deepseek_web_search"}` 服务端工具（替代已过时的 `web_search_20250305`），由服务端检索，客户端只解析 `web_search_tool_result`。请求显式带 `thinking: {"type": "disabled"}`——开启思考会变成深度思考搜索（多步 open_page/find_in_page），对一次工具调用过重。
+- **解析新字段**：结果直接取 `web_search_result` 的 `snippet` / `page_age` / `site_name`（原来只能拿回答里 citations 的 `cited_text` 兜底）；缺失时仍回退到 citations。`snippet`/`title`/`page_age` 为 `null` 时按空串处理，不再可能因 `get<std::string>()` 抛异常。
+- **失败路径更准确**：`web_search_tool_result_error` 的 `error_code` 上报为 `web search failed: <code>`；模型没联网（只有 text 块）时把回答正文作为结果内容返回，而不是报“没有搜索结果”。
+- **配置收敛**：移除 `WebSearchConfig::maxUses`（新工具不接受 `max_uses`，旧 settings.json 里的键会被忽略）；默认 `model` 改为 `deepseek-flash`（联网工具要求），`maxTokens` 从 4096 降到 512（只取结果块，回答正文丢弃）。
+
+### 新增
+
+- `build_web_search_request(query, config)`：请求体构造独立成函数，单测可直接断言工具声明、thinking 关闭、无 `max_uses`、query 注入。
+
+### 测试
+
+- 新增/改写 6 个用例：`BuildWebSearchRequestDeclaresServerTool`、`MapDeepSeekSearchResponse`（snippet/page_age/null）、`...FallsBackToCitationSnippet`、`...ReportsSearchError`、`...FallsBackToAnswer`、`...WithoutResultsIsError`；全套 190 项：189 通过 + 1 跳过。
+- 真机验证：匿名 Anthropic 兼容端点 + `PI_API_KEY` 下 `./build/picpp "<prompt>"` 一次性对话成功调用 web_search 并输出带 markdown 链接的引用。
+
+## 2026-11-22（日）目录规范：头文件全部移入 include/
+
+### 变更
+
+- **`src/` 只放 `.cpp`**：`src/ai/curl_http_client.h`、`src/app/terminal_input.h`、`src/harness/unique_fd.h` 移到对应的 `include/pi/{ai,app,harness}/`，`repl.h` 改为直接 `#include "pi/app/terminal_input.h"` 并删掉 `KeyEvent` 前置声明。
+- **去掉 `src` 头文件搜索根**：`pi_tests` 不再 `-I src`，`tests/ai/curl_http_client_test.cpp` 改用 `pi/ai/curl_http_client.h`，避免同一模块出现两套 include 根。
+- **格式检查锁定版本**：`scripts/check_format.py` 校验 `clang-format --version` 主版本为 18（与 CI 一致），不一致即报错并给出 `pip install clang-format==18.1.8`；`--allow-any-version` 可绕过。顺带按 18 修正了 `include/pi/app/repl.h`、`src/app/agent_session.cpp` 里由 19+ 格式化出的行尾注释对齐/大括号差异。
+
+### 测试
+
+- 全套 185 通过 + 1 跳过；三个移动后的头文件各自 `-fsyntax-only` 独立编译通过；`check_format.py --binary clang-format-18` 通过。
+
 ## 2026-11-22（日）交互与内存收尾：/thinking 选择器、异步压缩、流式会话列表
 
 ### 新增
 
 - **`/thinking` 选择器**：无参数时与 `/model` 一样用 ↑/↓ 选择（off/minimal/low/medium/high/xhigh），Enter 确认、Esc 取消；`/thinking <级别>` 直接设置。选择器抽象为通用的 `Repl::open_picker`（Model / Thinking 共用渲染与按键逻辑）。
-- **压缩可取消**：`AgentHarness::abort()` 现在同时设置压缩摘用的中止信号；REPL 的 `/compact` 改在 worker 线程执行（UI 不冻结），压缩期间 Esc 即可取消。
+- **压缩可取消**：`AgentHarness::abort()` 现在同时设置压缩专用的中止信号；REPL 的 `/compact` 改在 worker 线程执行（UI 不冻结），压缩期间 Esc 即可取消。
 
 ### 变更
 

@@ -54,6 +54,15 @@ std::string read_file_text(const std::string& path)
     return buffer.str();
 }
 
+/** 取字符串字段：缺失、null 或类型不符时返回空串（服务端的 snippet/title/page_age 可能为 null）。
+ */
+std::string json_str(const Json& obj, const char* key)
+{
+    const auto it = obj.find(key);
+    if (it == obj.end() || !it->is_string()) return "";
+    return it->get<std::string>();
+}
+
 std::string join_lines(const std::vector<std::string>& lines, size_t maxLines)
 {
     std::string out;
@@ -258,7 +267,7 @@ CurlFetchResult fetch_url(const std::string& url, int timeout_seconds, size_t ma
 
 // ---------- web search ----------
 
-// DeepSeek Anthropic-compatible Messages API 常量（镜像 dsh-web-search-deepseek）
+// DeepSeek Anthropic 兼容 Messages API 版本（联网工具只在 Messages API 下用该头）
 constexpr const char* kWebSearchApiVersion = "2023-06-01";
 
 /** 从 URL 提取 host（"://" 之后到第一个 / ? # 之间），作为无标题来源的兜底标签。 */
@@ -271,8 +280,8 @@ std::string hostname_of(const std::string& url)
 }
 
 /**
- * DeepSeek 原生 web search（镜像 DeepSeekSearchProvider.search）：经 Anthropic 兼容
- * Messages API 调用 web_search_20250305 server tool，解析结构化结果块。
+ * DeepSeek 原生 web search：经 Anthropic 兼容 Messages API 声明 deepseek_web_search
+ * 服务端工具（见 web_tools 指南），由服务端完成检索，客户端只解析 web_search_tool_result 块。
  * 不得抛异常——失败以 WebSearchResult::error 返回；abort 经 progress callback 中止。
  */
 WebSearchResult deepseek_web_search(const std::string& query, const std::string& apiKey,
@@ -294,18 +303,7 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
     }
     const std::string endpoint = base_url + "/messages";
 
-    // 请求体：镜像 DeepSeekSearchLlmRequest
-    Json body;
-    body["model"] = config.model;
-    body["max_tokens"] = config.maxTokens;
-    body["messages"] = Json::array(
-        {Json{{"role", "user"},
-              {"content",
-               Json::array({Json{{"type", "text"},
-                                 {"text", "Perform a web search for the query: " + query}}})}}});
-    body["tools"] = Json::array({Json{
-        {"type", "web_search_20250305"}, {"name", "web_search"}, {"max_uses", config.maxUses}}});
-    const std::string body_json = body.dump();
+    const std::string body_json = build_web_search_request(query, config).dump();
 
     CURL* curl = curl_easy_init();
     if (!curl)
@@ -399,70 +397,100 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
 
 }  // namespace
 
-/** 将 DeepSeek Anthropic Messages 响应映射为标准化搜索结果（镜像 mapAnthropicResponse）。 */
+Json build_web_search_request(const std::string& query, const WebSearchConfig& config)
+{
+    Json body;
+    body["model"] = config.model;
+    body["max_tokens"] = config.maxTokens;
+    // 关闭思考：开启后 deepseek_web_search 变成深度思考搜索（多步 open_page/find_in_page），
+    // 一次工具调用要跑十几步，过重
+    body["thinking"] = Json{{"type", "disabled"}};
+    body["messages"] = Json::array(
+        {Json{{"role", "user"},
+              {"content",
+               Json::array({Json{{"type", "text"},
+                                 {"text", "Perform a web search for the query: " + query}}})}}});
+    body["tools"] =
+        Json::array({Json{{"type", "deepseek_web_search"}, {"name", "deepseek_web_search"}}});
+    return body;
+}
+
 WebSearchResult map_deepseek_search_response(const Json& response, int maxResults)
 {
     WebSearchResult result;
     if (!response.is_object() || !response.contains("content") || !response["content"].is_array())
     {
-        result.error =
-            "DeepSeek returned no web_search_tool_result blocks; the request may not have "
-            "triggered native web search";
+        result.error = "DeepSeek returned an unprocessable search response";
         return result;
     }
 
-    // text 块的 citations 是 snippet 来源：url → cited_text（首次出现优先）
-    std::map<std::string, std::string> snippets;
+    std::string answer;  // 模型回答正文（没有搜索结果时兜底）
+    std::map<std::string, std::string> cited_snippets;  // url → cited_text（snippet 兜底）
     std::vector<WebSearchSource> sources;
     std::set<std::string> seen;
+    std::string search_error;  // web_search_tool_result_error 的 error_code
 
     for (const auto& block : response["content"])
     {
         if (!block.is_object()) continue;
-        const std::string type = block.value("type", "");
+        const std::string type = json_str(block, "type");
         if (type == "text")
         {
-            if (block.contains("citations") && block["citations"].is_array())
+            if (block.contains("text") && block["text"].is_string())
             {
-                for (const auto& cite : block["citations"])
-                {
-                    if (!cite.is_object()) continue;
-                    const std::string url = cite.value("url", "");
-                    const std::string cited_text = cite.value("cited_text", "");
-                    if (!url.empty() && !cited_text.empty() && snippets.find(url) == snippets.end())
-                    {
-                        snippets[url] = cited_text;
-                    }
-                }
+                answer += block["text"].get<std::string>();
             }
+            if (!block.contains("citations") || !block["citations"].is_array()) continue;
+            for (const auto& cite : block["citations"])
+            {
+                if (!cite.is_object()) continue;
+                const std::string url = json_str(cite, "url");
+                const std::string cited = json_str(cite, "cited_text");
+                if (!url.empty() && !cited.empty()) cited_snippets.emplace(url, cited);
+            }
+            continue;
         }
-        else if (type == "web_search_tool_result")
+        if (type != "web_search_tool_result") continue;
+        if (!block.contains("content") || !block["content"].is_array()) continue;
+        for (const auto& item : block["content"])
         {
-            if (!block.contains("content") || !block["content"].is_array()) continue;
-            for (const auto& item : block["content"])
+            if (!item.is_object()) continue;
+            const std::string item_type = json_str(item, "type");
+            if (item_type == "web_search_tool_result_error")
             {
-                if (!item.is_object()) continue;
-                if (item.value("type", "") != "web_search_result") continue;
-                const std::string url = item.value("url", "");
-                if (url.empty() || seen.count(url)) continue;
-                seen.insert(url);
-                WebSearchSource src;
-                src.url = url;
-                src.title = item.value("title", "");
-                src.publishedAt = item.value("page_age", "");
-                const auto it = snippets.find(url);
-                if (it != snippets.end()) src.snippet = it->second;
-                sources.push_back(std::move(src));
+                if (search_error.empty()) search_error = json_str(item, "error_code");
+                continue;
             }
+            if (item_type != "web_search_result") continue;
+            const std::string url = json_str(item, "url");
+            if (url.empty() || !seen.insert(url).second) continue;  // 重复 URL 按首次出现去重
+            WebSearchSource src;
+            src.url = url;
+            src.title = json_str(item, "title");
+            src.snippet = json_str(item, "snippet");
+            src.publishedAt = json_str(item, "page_age");
+            sources.push_back(std::move(src));
         }
     }
 
     if (sources.empty())
     {
-        result.error =
-            "DeepSeek returned no web_search_tool_result blocks; the request may not have "
-            "triggered native web search";
+        if (answer.find_first_not_of(" \t\r\n") != std::string::npos)
+        {
+            result.content = std::move(answer);
+            return result;
+        }
+        result.error = search_error.empty() ? "DeepSeek did not run a web search for this query"
+                                            : "web search failed: " + search_error;
         return result;
+    }
+
+    // 结果项自带 snippet 时优先用它；没有则用回答里的 citations 兜底
+    for (auto& source : sources)
+    {
+        if (!source.snippet.empty()) continue;
+        const auto it = cited_snippets.find(source.url);
+        if (it != cited_snippets.end()) source.snippet = it->second;
     }
 
     if (maxResults > 0 && static_cast<int>(sources.size()) > maxResults)

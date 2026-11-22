@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 目录规范：头文件一律放 include/pi/<层>/，src 只放实现（防止头文件回流到 src）
+file(GLOB_RECURSE PI_STRAY_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp")
+if(PI_STRAY_HEADERS)
+  message(FATAL_ERROR "src/ 下不应有头文件，请移到 include/pi/：${PI_STRAY_HEADERS}")
+endif()
+
 option(PI_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 set(PI_SANITIZER "" CACHE STRING "Sanitizer: address or thread")
 set_property(CACHE PI_SANITIZER PROPERTY STRINGS "" address thread)
@@ -140,7 +146,7 @@ if(BUILD_TESTING)
   )
 
   add_executable(pi_tests ${PI_TEST_SOURCES})
-  target_include_directories(pi_tests PRIVATE tests src)
+  target_include_directories(pi_tests PRIVATE tests)
   target_link_libraries(pi_tests PRIVATE pi_core gtest_main pi_build_options)
 
   enable_testing()

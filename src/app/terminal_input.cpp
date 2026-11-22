@@ -1,4 +1,4 @@
-#include "terminal_input.h"
+#include "pi/app/terminal_input.h"
 
 #include <poll.h>
 #include <unistd.h>

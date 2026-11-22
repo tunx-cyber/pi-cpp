@@ -12,16 +12,12 @@
 
 #include "pi/app/agent_session.h"
 #include "pi/app/memory_monitor.h"
+#include "pi/app/terminal_input.h"
 #include "pi/app/theme.h"
 #include "pi/harness/env.h"
 
 namespace pi
 {
-
-namespace terminal
-{
-struct KeyEvent;  // 定义在 src/app/terminal_input.h（避免 include 层反向依赖 src）
-}  // namespace terminal
 
 /** slash 命令条目（内建命令与用户模板共用，供命令菜单与 /help 使用）。 */
 struct CommandEntry
@@ -157,10 +153,10 @@ class Repl
     bool raw_mode_ = false;
     bool quit_requested_ = false;
     struct termios original_termios_;  // 进入 raw mode 前的终端设置，退出时完整恢复
-    int rendered_lines_ = 1;           // draw_prompt 上次渲染的总行数（提示 + 多行输入 + 菜单）
-    int rendered_extra_lines_ = 0;     // 其中输入区下方（菜单/选择器）占用的行数
-    int rendered_cursor_row_ = 0;      // 上次渲染时光标所在行（0 基，用于回到提示行首）
-    size_t menu_index_ = 0;            // 命令菜单选中项（matching_commands 下标）
+    int rendered_lines_ = 1;  // draw_prompt 上次渲染的总行数（提示 + 多行输入 + 菜单）
+    int rendered_extra_lines_ = 0;  // 其中输入区下方（菜单/选择器）占用的行数
+    int rendered_cursor_row_ = 0;  // 上次渲染时光标所在行（0 基，用于回到提示行首）
+    size_t menu_index_ = 0;        // 命令菜单选中项（matching_commands 下标）
     std::vector<CommandEntry> template_commands_;  // 用户模板命令（键入 / 时刷新）
 
     // 选择器状态（/model、/thinking 无参数时打开）
@@ -185,7 +181,7 @@ class Repl
     std::deque<UiEvent> event_queue_;
     int event_pipe_[2] = {-1, -1};
     std::thread worker_;
-    std::function<void()> unsubscribe_;     // 事件订阅句柄（析构时退订，避免悬空回调）
+    std::function<void()> unsubscribe_;  // 事件订阅句柄（析构时退订，避免悬空回调）
     std::atomic<bool> run_finished_{true};  // worker 收尾标志（退出路径用于提示用户）
 
     // 内存峰值监控（状态栏 /memory 命令共用）

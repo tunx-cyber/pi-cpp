@@ -80,8 +80,7 @@ AgentHarnessOptions build_harness_options(const Settings& settings, const std::s
     }
     options.thinkingLevel = settings.thinking;
     options.transport = make_openai_completions_transport(settings.baseUrl, settings.apiKey);
-    options.getApiKey = [&settings](const ModelInfo&) -> std::optional<std::string>
-    {
+    options.getApiKey = [&settings](const ModelInfo&) -> std::optional<std::string> {
         return settings.apiKey.empty() ? std::nullopt : std::optional<std::string>(settings.apiKey);
     };
     options.systemPromptBase = settings.systemPrompt;

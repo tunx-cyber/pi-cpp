@@ -315,24 +315,45 @@ TEST(CodingToolsTest, WebFetchLiveInternet)
     EXPECT_NE(text.find("Example Domain"), std::string::npos);
 }
 
+TEST(CodingToolsTest, BuildWebSearchRequestDeclaresServerTool)
+{
+    WebSearchConfig config;
+    const Json body = build_web_search_request("pi agent", config);
+    EXPECT_EQ(body["model"], config.model);
+    EXPECT_EQ(body["max_tokens"], config.maxTokens);
+    EXPECT_EQ(body["thinking"]["type"], "disabled");
+    ASSERT_TRUE(body["tools"].is_array());
+    ASSERT_EQ(body["tools"].size(), 1u);
+    EXPECT_EQ(body["tools"][0]["type"], "deepseek_web_search");
+    EXPECT_EQ(body["tools"][0]["name"], "deepseek_web_search");
+    EXPECT_FALSE(body["tools"][0].contains("max_uses"));  // 新工具不接受 max_uses
+    ASSERT_TRUE(body["messages"].is_array());
+    const std::string prompt = body["messages"][0]["content"][0]["text"].get<std::string>();
+    EXPECT_NE(prompt.find("pi agent"), std::string::npos);
+}
+
 TEST(CodingToolsTest, MapDeepSeekSearchResponse)
 {
     Json response;
     response["content"] = Json::array({
-        Json{{"type", "text"},
-             {"text", "results"},
-             {"citations",
-              Json::array({Json{{"url", "https://a.com/1"}, {"cited_text", "snippet a"}},
-                           Json{{"url", "https://b.com/2"}, {"cited_text", "snippet b"}}})}},
+        Json{{"type", "server_tool_use"},
+             {"name", "deepseek_web_search"},
+             {"kind", "search"},
+             {"input", Json{{"action", "search"}, {"queries", Json::array({"pi", "agent"})}}}},
         Json{{"type", "web_search_tool_result"},
+             {"kind", "search"},
              {"content", Json::array({Json{{"type", "web_search_result"},
                                            {"url", "https://a.com/1"},
                                            {"title", "A"},
-                                           {"page_age", "2 days ago"}},
+                                           {"snippet", "snippet a"},
+                                           {"site_name", "A News"},
+                                           {"page_age", "2026-01-02T03:04:05+00:00"}},
                                       Json{{"type", "web_search_result"},
                                            {"url", "https://b.com/2"},
                                            {"title", "B"},
-                                           {"page_age", "1 hour ago"}}})}},
+                                           {"snippet", "snippet b"},
+                                           {"site_name", nullptr},
+                                           {"page_age", nullptr}}})}},
         // 重复 url：应按首次出现去重
         Json{{"type", "web_search_tool_result"},
              {"content", Json::array({Json{{"type", "web_search_result"},
@@ -342,15 +363,35 @@ TEST(CodingToolsTest, MapDeepSeekSearchResponse)
 
     const auto result = map_deepseek_search_response(response, 8);
     EXPECT_TRUE(result.error.empty());
-    EXPECT_EQ(result.sources.size(), 2u);
+    EXPECT_TRUE(result.content.empty());
+    ASSERT_EQ(result.sources.size(), 2u);
     EXPECT_FALSE(result.truncated);
     EXPECT_EQ(result.sources[0].url, "https://a.com/1");
     EXPECT_EQ(result.sources[0].title, "A");
     EXPECT_EQ(result.sources[0].snippet, "snippet a");
-    EXPECT_EQ(result.sources[0].publishedAt, "2 days ago");
+    EXPECT_EQ(result.sources[0].publishedAt, "2026-01-02T03:04:05+00:00");
     EXPECT_EQ(result.sources[1].url, "https://b.com/2");
     EXPECT_EQ(result.sources[1].snippet, "snippet b");
-    EXPECT_EQ(result.sources[1].publishedAt, "1 hour ago");
+    EXPECT_EQ(result.sources[1].publishedAt, "");  // null 不抛异常
+}
+
+TEST(CodingToolsTest, MapDeepSeekSearchResponseFallsBackToCitationSnippet)
+{
+    Json response;
+    response["content"] = Json::array({
+        Json{{"type", "web_search_tool_result"},
+             {"content",
+              Json::array({Json{
+                  {"type", "web_search_result"}, {"url", "https://a.com"}, {"title", "A"}}})}},
+        Json{{"type", "text"},
+             {"text", "answer"},
+             {"citations",
+              Json::array({Json{{"url", "https://a.com"}, {"cited_text", "cited a"}}})}},
+    });
+
+    const auto result = map_deepseek_search_response(response, 8);
+    ASSERT_EQ(result.sources.size(), 1u);
+    EXPECT_EQ(result.sources[0].snippet, "cited a");
 }
 
 TEST(CodingToolsTest, MapDeepSeekSearchResponseTruncates)
@@ -370,13 +411,41 @@ TEST(CodingToolsTest, MapDeepSeekSearchResponseTruncates)
     EXPECT_TRUE(result.truncated);
 }
 
-TEST(CodingToolsTest, MapDeepSeekSearchResponseMissingBlocksIsError)
+TEST(CodingToolsTest, MapDeepSeekSearchResponseReportsSearchError)
 {
     Json response;
-    response["content"] = Json::array({Json{{"type", "text"}, {"text", "no results"}}});
+    response["content"] =
+        Json::array({Json{{"type", "web_search_tool_result"},
+                          {"content", Json::array({Json{{"type", "web_search_tool_result_error"},
+                                                        {"error_code", "unavailable"}}})}}});
+    const auto result = map_deepseek_search_response(response, 8);
+    EXPECT_TRUE(result.sources.empty());
+    EXPECT_NE(result.error.find("web search failed: unavailable"), std::string::npos);
+}
+
+TEST(CodingToolsTest, MapDeepSeekSearchResponseFallsBackToAnswer)
+{
+    // 模型没有联网（只给正文）时，把正文当结果内容返回，而不是报错
+    Json response;
+    response["content"] = Json::array({Json{{"type", "text"}, {"text", "Paris is the capital"}},
+                                       Json{{"type", "text"}, {"text", " of France."}}});
+    const auto result = map_deepseek_search_response(response, 8);
+    EXPECT_TRUE(result.error.empty());
+    EXPECT_TRUE(result.sources.empty());
+    EXPECT_EQ(result.content, "Paris is the capital of France.");
+}
+
+TEST(CodingToolsTest, MapDeepSeekSearchResponseWithoutResultsIsError)
+{
+    Json response;
+    response["content"] = Json::array({Json{{"type", "text"}, {"text", "   "}}});
     const auto result = map_deepseek_search_response(response, 8);
     EXPECT_FALSE(result.error.empty());
-    EXPECT_NE(result.error.find("no web_search_tool_result blocks"), std::string::npos);
+    EXPECT_NE(result.error.find("did not run a web search"), std::string::npos);
+
+    const auto empty = map_deepseek_search_response(Json::object(), 8);
+    EXPECT_FALSE(empty.error.empty());
+    EXPECT_NE(empty.error.find("unprocessable"), std::string::npos);
 }
 
 TEST(CodingToolsTest, FormatSearchOutput)

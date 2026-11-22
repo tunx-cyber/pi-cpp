@@ -8,11 +8,11 @@
 #include "pi/app/images.h"
 #include "pi/app/repl.h"
 #include "pi/app/selection.h"
+#include "pi/app/terminal_input.h"
 #include "pi/app/usage_format.h"
 #include "pi/harness/compaction.h"
 #include "pi/harness/prompt_templates.h"
 #include "pi/harness/skills.h"
-#include "terminal_input.h"
 
 namespace pi
 {

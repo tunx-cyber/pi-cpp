@@ -1,5 +1,6 @@
 # Google C++ Style（clang-format 内置 Google 配置 + 项目微调）
-# 用法：clang-format -i $(find include src tests -name '*.cpp' -o -name '*.hpp')
+# 版本：与 CI 一致用 clang-format 18（19+ 会重排聚合初始化/行尾注释，结果与 CI 相反）
+# 用法：clang-format -i $(find include src apps tests -name '*.cpp' -o -name '*.h')
 Language: Cpp
 BasedOnStyle: Google
 # 缩进 4 空格（覆盖 Google 默认 2 空格）

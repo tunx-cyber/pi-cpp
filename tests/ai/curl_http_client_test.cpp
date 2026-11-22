@@ -1,4 +1,4 @@
-#include "ai/curl_http_client.h"
+#include "pi/ai/curl_http_client.h"
 
 #include <gtest/gtest.h>
 

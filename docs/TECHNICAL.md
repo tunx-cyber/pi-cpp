@@ -17,7 +17,7 @@ pi-cpp/
 │   ├── agent/    Agent 状态机、agent 循环、双队列、schema 校验、子 agent 工具
 │   ├── harness/  会话(JSONL)、压缩、skills、模板、env(POSIX)、AgentHarness
 │   └── app/      settings、图片、slash 命令、REPL、AgentSession
-├── src/          与 include 一一对应的实现
+├── src/          与 include 一一对应的实现（只放 .cpp，头文件一律进 include/）
 ├── apps/repl/main.cpp  薄入口（交互 REPL / 管道一次性对话）
 └── tests/        googletest 单测 + test_utils（fake SSE server、脚本化 transport）
 ```
@@ -250,7 +250,7 @@ JSONL 格式（pi 兼容 version-3）：
   "theme": "default",
   "compaction": { "reserveTokens": 16384, "keepRecentTokens": 20000 },
   "webSearch": { "baseUrl": "https://api.deepseek.com/anthropic/v1",
-    "model": "deepseek-v4-flash", "maxTokens": 4096, "maxUses": 5, "maxResults": 8 },
+    "model": "deepseek-flash", "maxTokens": 512, "maxResults": 8 },
   "byCwd": { "/path/to/project": {"model": "deepseek-v4-pro", "thinking": "high"} }
 }
 ```
@@ -261,7 +261,7 @@ API key 只来自 env/.env：`PI_API_KEY` > `DEEPSEEK_API_KEY` > `OPENAI_API_KEY
 
 models 数组：定义自定义模型（id 必填；name/baseUrl/contextWindow/maxTokens/reasoning 等可选；缺省 baseUrl 回退到全局 baseUrl，reasoning 默认 false）。同名 id 覆盖内置模型；这些模型会出现在 /model 列表并可切换，Ctrl+P 循环切换全部模型。自定义模型使用自身 baseUrl（内置模型仍跟随全局 baseUrl/PI_BASE_URL）。**注意**：/model 的无参列表与 Ctrl+P 优先使用端点 `GET /models` 的返回结果；settings.json 中的自定义模型主要用于补全元数据，并在 /models 请求失败时作为回退列表。
 
-compaction 对象：reserveTokens/keepRecentTokens 只影响手动 `/compact` 的切点（不再有自动压缩；旧 `enabled` 键会被忽略）。theme 选择终端主题（default / mono，未知名称回退 default；`NO_COLOR` 环境变量强制 mono）。systemPrompt 覆盖系统提示词 base。webSearch 对象：baseUrl/model/maxTokens/maxUses/maxResults 控制 web_search 工具（baseUrl 仍可被环境变量 DEEPSEEK_SEARCH_BASE_URL 覆盖）。sessionsRoot 指定会话存储目录。
+compaction 对象：reserveTokens/keepRecentTokens 只影响手动 `/compact` 的切点（不再有自动压缩；旧 `enabled` 键会被忽略）。theme 选择终端主题（default / mono，未知名称回退 default；`NO_COLOR` 环境变量强制 mono）。systemPrompt 覆盖系统提示词 base。webSearch 对象：baseUrl/model/maxTokens/maxResults 控制 web_search 工具（baseUrl 仍可被环境变量 DEEPSEEK_SEARCH_BASE_URL 覆盖；旧 `maxUses` 键已移除——服务端 `deepseek_web_search` 不接受该参数，保留也不报错）。web_search 的实现是“嵌套一次 Messages 请求”：声明 `deepseek_web_search` 服务端工具并显式 `thinking: {"type": "disabled"}`（开启思考会变成深度思考搜索，一次工具调用要跑十几步 open_page/find_in_page），客户端只解析 `web_search_tool_result` 块里的 `title/url/snippet/page_age`。模型没有联网（只有 text 块）时把正文当结果返回，`web_search_tool_result_error` 的 `error_code` 作为错误上报。sessionsRoot 指定会话存储目录。
 
 ### 5.2 图片（images.cpp）
 
@@ -375,7 +375,7 @@ cmake -S . -B build-tsan -G Ninja -DPI_SANITIZER=thread \
 cmake --build build-tsan && ./build-tsan/pi_tests
 ```
 
-格式检查：`python3 scripts/check_format.py`，修复：追加 `--fix`。CI 对 PR/push 修改的项目 C++ 文件执行检查，使用 clang-format 18。
+格式检查：`python3 scripts/check_format.py`，修复：追加 `--fix`。CI 对 PR/push 修改的项目 C++ 文件执行检查，使用 clang-format 18；脚本会校验 `--version` 主版本，不一致（如 Homebrew 的 19+）直接报错退出，避免聚合初始化、行尾注释对齐等规则差异造成本地与 CI 结果相反（`--allow-any-version` 可绕过）。
 
 Linux 上若 TSan 在启动时报 `unexpected memory mapping`，可用
 `setarch x86_64 -R ./build-tsan/pi_tests` 仅关闭该测试进程的地址随机化；Linux CI 使用相同方式启动，
@@ -396,6 +396,7 @@ Linux 上若 TSan 在启动时报 `unexpected memory mapping`，可用
 5. **用量统计**：`AgentSession` 的 token 累计值（`session_usage_`/`all_time_usage_`/`last_turn_usage_`）写入必须持 `usage_mutex_`，读取同样加锁。只累计四项 token，不涉及金额。
 6. **行为规范是 pi 的 vitest 套件**：agent_loop / compaction / session / transport 的语义对照 pi 对应测试，改动行为时同步更新本仓库对应测试与本文档。
 7. **工具执行不得抛异常**：工具在 agent 循环中无 try/catch 包裹，异常会冒泡到 `Agent::run` 的兜底 catch，直接终结整轮对话。参数解析（尤其 LLM 传入的 `get<type>()`）必须自行兜底为错误文本——web_fetch 的整体 try/catch 是范例。
+8. **头文件只放 `include/pi/<层>/`**：`src/` 只放 `.cpp`，不给 `src` 设置头文件搜索根（`pi_tests` 已不再 `-I src`），避免同一模块出现两套 include 根。
 
 ### 12.2 新增 provider / 模型 / 工具 / 命令
 

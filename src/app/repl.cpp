@@ -13,9 +13,9 @@
 #include <vector>
 
 #include "pi/app/conversation_format.h"
+#include "pi/app/terminal_input.h"
 #include "pi/app/usage_format.h"
 #include "pi/util/scope_exit.h"
-#include "terminal_input.h"
 
 namespace pi
 {

@@ -14,8 +14,8 @@
 #include <thread>
 
 #include "pi/harness/env.h"
+#include "pi/harness/unique_fd.h"
 #include "pi/util/scope_exit.h"
-#include "unique_fd.h"
 
 #if defined(__APPLE__)
 #include <crt_externs.h>
