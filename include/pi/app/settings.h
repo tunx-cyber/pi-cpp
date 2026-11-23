@@ -1,59 +1,39 @@
 #pragma once
 
-#include <optional>
 #include <string>
-#include <vector>
 
-#include "pi/ai/model_info.h"
 #include "pi/ai/types.h"
-#include "pi/app/commands.h"
-#include "pi/harness/types.h"
 
 namespace pi
 {
 
-/** ~/.pi-cpp/settings.json（模型/thinking 按 cwd 持久化）。 */
+/**
+ * 运行配置：只从环境变量解析（进程环境 → 项目 `.env` → `~/.pi-cpp/.env`）。
+ *
+ * 不读写 `~/.pi-cpp/settings.json`：模型与 thinking 级别随会话（JSONL 里的
+ * ModelChange / ThinkingLevelChange 条目）保存，全局默认值一律由环境变量给出。
+ */
 struct Settings
 {
-    /** 仅从 env 解析（PI_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY），不读 settings.json。 */
+    /** `PI_API_KEY` > `OPENAI_API_KEY`。 */
     std::string apiKey;
-    /** 代码默认端点；可用 env PI_BASE_URL 覆盖，不读 settings.json。 */
+    /** `PI_BASE_URL`；裸域名自动补 `/v1`。 */
     std::string baseUrl = "https://api.deepseek.com";
-    /**
-     * 当前模型 id；空表示"未指定"——运行时由端点 `GET /models` 返回的第一个模型确定，
-     * 不在代码里写死任何默认模型。可由 PI_MODEL / settings.json / byCwd 显式指定。
-     */
+    /** `PI_MODEL`；空表示"未指定"，由端点 `GET /models` 决定。 */
     std::string model;
+    /** `PI_THINKING`（off/minimal/low/medium/high/xhigh）。 */
     ThinkingLevel thinking = ThinkingLevel::Off;
+    /** `PI_SESSIONS_ROOT`。 */
     std::string sessionsRoot = "~/.pi-cpp/agent/sessions";
-    /** 系统提示词 base（settings.json 的 systemPrompt 键）。 */
+    /** `PI_SYSTEM_PROMPT`：覆盖内置的 base 系统提示词。 */
     std::string systemPrompt = "You are pi-cpp, a helpful coding assistant in a terminal.";
-    /** settings.json 的 models 数组定义的自定义模型（可覆盖内置模型）。 */
-    std::vector<ModelInfo> models;
-    /** 自动压缩参数（settings.json 的 compaction 对象）。 */
-    CompactionSettings compaction;
-    /** web_search 参数（settings.json 的 webSearch 对象）。 */
-    WebSearchConfig webSearch;
-    /** 终端主题（settings.json 的 theme 键，默认 default；预留自定义）。 */
+    /** `PI_THEME`（default / mono）。 */
     std::string theme = "default";
 
-    /** 按 cwd 覆盖（模型选择跨重启保留）。 */
-    struct CwdOverride
-    {
-        std::optional<std::string> model;
-        std::optional<ThinkingLevel> thinking;
-    };
-    std::optional<CwdOverride> override_for(const std::string& cwd) const;
-
-    /** 加载（文件不存在返回默认值）。 */
+    /** 读取配置（缺失的变量用结构体里的默认值）。 */
     static Settings load();
-    /** 保存（合并 cwd 覆盖后写回）。 */
-    void save() const;
-    /** 更新某 cwd 的覆盖并持久化。 */
-    void set_override(const std::string& cwd, const std::optional<std::string>& model,
-                      const std::optional<ThinkingLevel>& thinking);
 
-    /** 展开 ~ 并解析。 */
+    /** 展开 `~`。 */
     static std::string expand_home(const std::string& path);
 };
 

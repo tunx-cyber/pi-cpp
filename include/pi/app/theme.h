@@ -6,7 +6,7 @@ namespace pi
 {
 
 /**
- * 终端主题：颜色集中在这里，便于以后扩展/自定义（settings.json 已预留 theme 键）。
+ * 终端主题：颜色集中在这里，便于以后扩展（用 PI_THEME 选择，预留自定义主题）。
  * 目前只有 default（彩色）与 mono（无颜色，NO_COLOR 时自动选用）。
  */
 struct Theme

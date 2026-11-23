@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <map>
-#include <mutex>
 
 namespace pi
 {
@@ -49,13 +48,6 @@ std::vector<ModelInfo>& models()
     return models;
 }
 
-/** 模型表互斥锁：register/unregister/get 可能在设置加载与 run 线程之间并发调用。 */
-std::mutex& registry_mutex()
-{
-    static std::mutex mutex;
-    return mutex;
-}
-
 std::string ascii_lower(std::string value)
 {
     for (char& c : value)
@@ -96,33 +88,8 @@ std::string endpoint_host(const std::string& url)
 
 }  // namespace
 
-void register_model(const ModelInfo& model)
-{
-    std::lock_guard<std::mutex> lock(registry_mutex());
-    auto& list = models();
-    for (auto& existing : list)
-    {
-        if (existing.id == model.id)
-        {
-            existing = model;
-            return;
-        }
-    }
-    list.push_back(model);
-}
-
-void unregister_model(const std::string& id)
-{
-    std::lock_guard<std::mutex> lock(registry_mutex());
-    auto& list = models();
-    list.erase(
-        std::remove_if(list.begin(), list.end(), [&](const ModelInfo& m) { return m.id == id; }),
-        list.end());
-}
-
 std::optional<ModelInfo> get_model(const std::string& modelId)
 {
-    std::lock_guard<std::mutex> lock(registry_mutex());
     for (const auto& model : models())
     {
         if (model.id == modelId) return model;
@@ -132,7 +99,6 @@ std::optional<ModelInfo> get_model(const std::string& modelId)
 
 std::vector<std::string> get_providers()
 {
-    std::lock_guard<std::mutex> lock(registry_mutex());
     std::vector<std::string> providers;
     for (const auto& model : models())
     {
@@ -146,7 +112,6 @@ std::vector<std::string> get_providers()
 
 std::vector<ModelInfo> get_models(const std::string& provider)
 {
-    std::lock_guard<std::mutex> lock(registry_mutex());
     std::vector<ModelInfo> out;
     for (const auto& model : models())
     {
@@ -157,7 +122,6 @@ std::vector<ModelInfo> get_models(const std::string& provider)
 
 std::optional<ModelInfo> find_model_template(const std::string& modelId, const std::string& baseUrl)
 {
-    std::lock_guard<std::mutex> lock(registry_mutex());
     const auto& list = models();
     const std::string id = ascii_lower(modelId);
 

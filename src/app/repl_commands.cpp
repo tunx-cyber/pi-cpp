@@ -62,7 +62,7 @@ std::optional<int> parse_uint(const std::string& s)
     return value;
 }
 
-/** 注册表（内置 + settings.json 自定义）里的全部模型 id。 */
+/** 内置模型表里的全部模型 id。 */
 std::vector<std::string> registered_model_ids()
 {
     std::vector<std::string> ids;
@@ -229,7 +229,7 @@ void Repl::handle_command(const std::string& line)
             if (arg_start != std::string::npos)
             {
                 const std::string model_id = line.substr(arg_start);
-                // 注册表（内置元数据 + settings.json 自定义）优先，其次以端点 GET /models 为准。
+                // 内置元数据优先，其次以端点 GET /models 为准。
                 bool verified = get_model(model_id).has_value();
                 std::string warning;
                 if (!verified)
@@ -449,8 +449,7 @@ void Repl::handle_command(const std::string& line)
     }
     if (name == "tools")
     {
-        session_.set_tools(
-            make_coding_tools(cwd_, session_.api_key(), session_.web_search_config()));
+        session_.set_tools(make_coding_tools(cwd_, session_.api_key()));
         std::cout << "已启用编码工具：read/bash/edit/write/grep/find/ls/web_fetch/web_search"
                   << std::endl;
         return;

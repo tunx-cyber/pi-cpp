@@ -9,19 +9,13 @@
 namespace pi
 {
 
-/** Register a custom model override (e.g. from settings.json). Overrides built-ins. */
-void register_model(const ModelInfo& model);
-
-/** Remove a custom model override. */
-void unregister_model(const std::string& id);
-
-/** Look up a model by id (custom overrides take precedence). */
+/** Look up a built-in model by id. */
 std::optional<ModelInfo> get_model(const std::string& modelId);
 
-/** All models (built-in + overrides), keyed by provider. */
+/** 内置模型覆盖的 provider 列表。 */
 std::vector<std::string> get_providers();
 
-/** Models for one provider. */
+/** 某个 provider 下的内置模型。 */
 std::vector<ModelInfo> get_models(const std::string& provider);
 
 /**

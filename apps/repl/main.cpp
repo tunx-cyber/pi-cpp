@@ -110,7 +110,7 @@ int run_app(int argc, char** argv)
             return 1;
         }
         if (!model_notice.empty()) std::cerr << model_notice << std::endl;
-        session.set_tools(pi::make_coding_tools(cwd, settings.apiKey, settings.webSearch));
+        session.set_tools(pi::make_coding_tools(cwd, settings.apiKey));
 
         // 流式输出到 stdout，结束打印 usage
         session.subscribe(
@@ -183,8 +183,8 @@ int run_app(int argc, char** argv)
     }
     // 交互模式与一次性模式一致：启动即装配编码工具（read/bash/edit/write/grep/find/ls/
     // web_fetch/web_search）。此前只有 /tools 才装，用户不敲命令就无法读写文件。
-    session.set_tools(pi::make_coding_tools(cwd, settings.apiKey, settings.webSearch));
-    // 主题：settings.json 的 theme 键（默认 default）；NO_COLOR 环境变量强制 mono。
+    session.set_tools(pi::make_coding_tools(cwd, settings.apiKey));
+    // 主题：PI_THEME（默认 default）；NO_COLOR 环境变量强制 mono。
     const char* no_color = std::getenv("NO_COLOR");
     const bool mono = no_color != nullptr && *no_color != '\0';
     const pi::Theme theme = pi::theme_by_name(mono ? "mono" : settings.theme);

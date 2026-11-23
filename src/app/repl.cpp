@@ -153,9 +153,15 @@ Repl::Repl(AgentSession& session, std::string cwd, Theme theme, bool show_histor
             {
                 if (event.message.stopReason == StopReason::Error)
                 {
-                    const std::string message = event.message.errorMessage.empty()
-                                                    ? "AI request failed"
-                                                    : event.message.errorMessage;
+                    std::string message = event.message.errorMessage.empty()
+                                              ? "AI request failed"
+                                              : event.message.errorMessage;
+                    // 不预判模型能力：只有真实请求报错提到 thinking/reasoning 时才提示调整
+                    if (mentions_thinking(message))
+                    {
+                        message +=
+                            "\n（可能是当前模型不支持该 thinking 级别：用 /thinking 调整或关闭）";
+                    }
                     enqueue(
                         UiEvent{UiEvent::Type::Delta,
                                 "\r\n" + styled(theme_, theme_.error, "[error] " + message) + "\n",

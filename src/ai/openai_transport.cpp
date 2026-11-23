@@ -582,7 +582,7 @@ class OpenAiCompletionsTransport::Impl
     {
         openai::ClientOptions options;
         options.api_key = apiKey;
-        // 自定义模型用自身 baseUrl（settings.json 的 models[]）；内置模型跟随全局
+        // 模型自带 baseUrl 时用它；否则跟随全局
         // baseUrl（settings.baseUrl / PI_BASE_URL），保持既有覆盖语义。
         const bool custom_endpoint = model.provider == "custom" && !model.baseUrl.empty();
         options.base_url = custom_endpoint ? model.baseUrl : baseUrl_;

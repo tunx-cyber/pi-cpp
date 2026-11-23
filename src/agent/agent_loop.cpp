@@ -157,9 +157,10 @@ bool has_sequential_tool_call(const std::vector<ContentBlock>& tool_calls,
 }
 
 ExecutedToolBatch execute_tool_calls_sequential(AgentContext& context,
-                                                const AgentMessage& assistant_message,
+                                                const AgentMessage& /*assistant_message*/,
                                                 const std::vector<ContentBlock>& tool_calls,
-                                                AgentLoopConfig& config, const AgentEventSink& emit,
+                                                AgentLoopConfig& /*config*/,
+                                                const AgentEventSink& emit,
                                                 const std::shared_ptr<std::atomic<bool>>& signal)
 {
     std::vector<FinalizedToolCallOutcome> finalized_calls;
@@ -223,9 +224,10 @@ ExecutedToolBatch execute_tool_calls_sequential(AgentContext& context,
 }
 
 ExecutedToolBatch execute_tool_calls_parallel(AgentContext& context,
-                                              const AgentMessage& assistant_message,
+                                              const AgentMessage& /*assistant_message*/,
                                               const std::vector<ContentBlock>& tool_calls,
-                                              AgentLoopConfig& config, const AgentEventSink& emit,
+                                              AgentLoopConfig& /*config*/,
+                                              const AgentEventSink& emit,
                                               const std::shared_ptr<std::atomic<bool>>& signal)
 {
     struct Entry

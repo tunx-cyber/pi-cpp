@@ -14,14 +14,17 @@ namespace pi
 namespace
 {
 
-/** 临时清除环境变量（析构时恢复），避免宿主环境干扰 Settings::load()。 */
+/** 临时清除/设置环境变量（析构时恢复），避免宿主环境干扰 Settings::load()。 */
 class ScopedEnvVar
 {
    public:
-    explicit ScopedEnvVar(const char* name) : name_(name)
+    explicit ScopedEnvVar(const char* name, const char* value = nullptr) : name_(name)
     {
-        if (const char* value = std::getenv(name)) old_ = std::string(value);
-        unsetenv(name);
+        if (const char* old = std::getenv(name)) old_ = std::string(old);
+        if (value)
+            setenv(name, value, 1);
+        else
+            unsetenv(name);
     }
     ~ScopedEnvVar()
     {
@@ -36,7 +39,7 @@ class ScopedEnvVar
     std::optional<std::string> old_;
 };
 
-/** 临时切换 cwd（析构时恢复），确保不会读到仓库根目录的 .env。 */
+/** 临时切换 cwd（确保不会读到仓库根目录的 .env）。 */
 class ScopedCurrentPath
 {
    public:
@@ -55,6 +58,7 @@ class ScopedCurrentPath
     std::filesystem::path old_;
 };
 
+/** 隔离 HOME 与 cwd：既不会读到真实 ~/.pi-cpp，也不会读到仓库 .env。 */
 class SettingsTest : public ::testing::Test
 {
    protected:
@@ -81,201 +85,135 @@ class SettingsTest : public ::testing::Test
     std::string old_home_;
 };
 
-TEST_F(SettingsTest, PersistsCwdOverrides)
+TEST_F(SettingsTest, DefaultsWithNoEnv)
 {
-    Settings settings;
-    settings.set_override("/workspace", "deepseek-v4-pro", ThinkingLevel::High);
-
-    const auto override = Settings::load().override_for("/workspace");
-    ASSERT_TRUE(override.has_value());
-    ASSERT_TRUE(override->model.has_value());
-    ASSERT_TRUE(override->thinking.has_value());
-    EXPECT_EQ(*override->model, "deepseek-v4-pro");
-    EXPECT_EQ(*override->thinking, ThinkingLevel::High);
-
-    const auto settings_path = Settings::expand_home("~/.pi-cpp/settings.json");
-    EXPECT_EQ(
-        std::filesystem::status(settings_path).permissions() & std::filesystem::perms::group_read,
-        std::filesystem::perms::none);
-}
-
-TEST_F(SettingsTest, DoesNotPersistApiCredentials)
-{
-    // 预置旧版本遗留的凭据键，save() 后应被移除
-    const auto settings_path = Settings::expand_home("~/.pi-cpp/settings.json");
-    std::filesystem::create_directories(std::filesystem::path(settings_path).parent_path());
-    {
-        std::ofstream file(settings_path);
-        file << R"({"apiKey":"old-key","baseUrl":"https://old.invalid","model":"old-model"})";
-    }
-
-    Settings settings;
-    settings.apiKey = "secret";
-    settings.baseUrl = "https://example.invalid";
-    settings.model = "file-model";
-    settings.save();
-
-    std::ifstream file(settings_path);
-    ASSERT_TRUE(file.is_open());
-    const Json json = Json::parse(file);
-    EXPECT_FALSE(json.contains("apiKey"));
-    EXPECT_FALSE(json.contains("baseUrl"));
-    EXPECT_EQ(json.value("model", std::string("")), "file-model");
-}
-
-TEST_F(SettingsTest, IgnoresApiCredentialsFromSettingsFile)
-{
-    // 清空相关 env 并离开仓库目录，确保只验证 settings.json 中的键被忽略
-    ScopedEnvVar pi_key("PI_API_KEY");
-    ScopedEnvVar deepseek_key("DEEPSEEK_API_KEY");
+    ScopedEnvVar api_key("PI_API_KEY");
     ScopedEnvVar openai_key("OPENAI_API_KEY");
-    ScopedEnvVar pi_base("PI_BASE_URL");
-    ScopedEnvVar pi_model("PI_MODEL");
+    ScopedEnvVar base_url("PI_BASE_URL");
+    ScopedEnvVar model("PI_MODEL");
+    ScopedEnvVar thinking("PI_THINKING");
+    ScopedEnvVar sessions_root("PI_SESSIONS_ROOT");
+    ScopedEnvVar system_prompt("PI_SYSTEM_PROMPT");
+    ScopedEnvVar theme("PI_THEME");
     ScopedCurrentPath cwd(home_);
 
-    const auto dir = std::filesystem::path(home_) / ".pi-cpp";
-    std::filesystem::create_directories(dir);
-    {
-        std::ofstream file(dir / "settings.json");
-        file << R"({"apiKey":"file-key","baseUrl":"https://file.invalid","model":"file-model"})";
-    }
-
-    const auto loaded = Settings::load();
-    EXPECT_TRUE(loaded.apiKey.empty());
-    // 默认端点按 OpenAI 兼容惯例规范化：裸域名补 /v1
-    EXPECT_EQ(loaded.baseUrl, "https://api.deepseek.com/v1");
-    EXPECT_EQ(loaded.model, "file-model");  // 其他键仍从 settings.json 读取
+    const auto settings = Settings::load();
+    EXPECT_TRUE(settings.apiKey.empty());
+    EXPECT_EQ(settings.baseUrl, "https://api.deepseek.com/v1");
+    EXPECT_TRUE(settings.model.empty());  // 不写死默认模型
+    EXPECT_EQ(settings.thinking, ThinkingLevel::Off);
+    EXPECT_EQ(settings.sessionsRoot, "~/.pi-cpp/agent/sessions");
+    EXPECT_EQ(settings.theme, "default");
+    EXPECT_FALSE(settings.systemPrompt.empty());
 }
 
-TEST_F(SettingsTest, FallsBackToDeepSeekApiKey)
+TEST_F(SettingsTest, ReadsApiKeyWithPrecedence)
 {
-    ScopedEnvVar pi_key("PI_API_KEY");
-    ScopedEnvVar deepseek_key("DEEPSEEK_API_KEY");
+    ScopedEnvVar api_key("PI_API_KEY");
     ScopedEnvVar openai_key("OPENAI_API_KEY");
-    ScopedEnvVar pi_base("PI_BASE_URL");
+    ScopedEnvVar deepseek_key("DEEPSEEK_API_KEY");
+    ScopedEnvVar base_url("PI_BASE_URL");
     ScopedCurrentPath cwd(home_);
 
+    // DEEPSEEK_API_KEY 不再是受支持的变量
     setenv("DEEPSEEK_API_KEY", "deepseek-key", 1);
-    EXPECT_EQ(Settings::load().apiKey, "deepseek-key");
+    EXPECT_TRUE(Settings::load().apiKey.empty());
 
-    // PI_API_KEY 优先于 DEEPSEEK_API_KEY
+    setenv("OPENAI_API_KEY", "openai-key", 1);
+    EXPECT_EQ(Settings::load().apiKey, "openai-key");
+
     setenv("PI_API_KEY", "pi-key", 1);
     EXPECT_EQ(Settings::load().apiKey, "pi-key");
 }
 
 TEST_F(SettingsTest, NormalizesBareBaseUrl)
 {
-    ScopedEnvVar pi_base("PI_BASE_URL");
-    ScopedEnvVar pi_key("PI_API_KEY");
+    ScopedEnvVar base_url("PI_BASE_URL");
+    ScopedEnvVar api_key("PI_API_KEY");
     ScopedCurrentPath cwd(home_);
 
-    const auto with_bare_host = []
-    {
-        setenv("PI_BASE_URL", "https://api.example.com", 1);
-        return Settings::load().baseUrl;
-    }();
-    EXPECT_EQ(with_bare_host, "https://api.example.com/v1");
+    setenv("PI_BASE_URL", "https://api.example.com", 1);
+    EXPECT_EQ(Settings::load().baseUrl, "https://api.example.com/v1");
 
-    const auto with_trailing_slash = []
-    {
-        setenv("PI_BASE_URL", "https://api.example.com/v1/", 1);
-        return Settings::load().baseUrl;
-    }();
-    EXPECT_EQ(with_trailing_slash, "https://api.example.com/v1");
+    setenv("PI_BASE_URL", "https://api.example.com/v1/", 1);
+    EXPECT_EQ(Settings::load().baseUrl, "https://api.example.com/v1");
 
-    // 带路径的端点原样保留（例如自建网关的 /openai/v1、Anthropic 的 /anthropic/v1）
-    const auto with_path = []
-    {
-        setenv("PI_BASE_URL", "https://gateway.example.com/openai/v1", 1);
-        return Settings::load().baseUrl;
-    }();
-    EXPECT_EQ(with_path, "https://gateway.example.com/openai/v1");
+    // 带路径的端点原样保留（自建网关的 /openai/v1、Anthropic 的 /anthropic/v1）
+    setenv("PI_BASE_URL", "https://gateway.example.com/openai/v1", 1);
+    EXPECT_EQ(Settings::load().baseUrl, "https://gateway.example.com/openai/v1");
 }
 
-TEST_F(SettingsTest, DefaultsToNoModel)
+TEST_F(SettingsTest, ReadsModelThinkingThemeAndPaths)
 {
-    // 不写死任何默认模型：没有 settings.json / PI_MODEL 时 model 为空，
-    // 由运行时 GET /models 返回的第一个模型确定。
-    ScopedEnvVar pi_model("PI_MODEL");
+    ScopedEnvVar api_key("PI_API_KEY");
+    ScopedEnvVar base_url("PI_BASE_URL");
+    ScopedEnvVar model("PI_MODEL", "mimo-v2.6-flash");
+    ScopedEnvVar thinking("PI_THINKING", "high");
+    ScopedEnvVar sessions_root("PI_SESSIONS_ROOT", "/tmp/pi-test-sessions");
+    ScopedEnvVar system_prompt("PI_SYSTEM_PROMPT", "custom system prompt");
+    ScopedEnvVar theme("PI_THEME", "mono");
     ScopedCurrentPath cwd(home_);
 
-    const auto loaded = Settings::load();
-    EXPECT_TRUE(loaded.model.empty());
+    const auto settings = Settings::load();
+    EXPECT_EQ(settings.model, "mimo-v2.6-flash");
+    EXPECT_EQ(settings.thinking, ThinkingLevel::High);
+    EXPECT_EQ(settings.sessionsRoot, "/tmp/pi-test-sessions");
+    EXPECT_EQ(settings.systemPrompt, "custom system prompt");
+    EXPECT_EQ(settings.theme, "mono");
 }
 
-TEST_F(SettingsTest, DoesNotPersistUnresolvedModel)
+TEST_F(SettingsTest, ReadsProjectDotEnv)
 {
-    // 自动探测出的模型不应被固化成 settings.json 的默认值
-    Settings settings;
-    ASSERT_TRUE(settings.model.empty());
-    settings.save();
-
-    const auto settings_path = Settings::expand_home("~/.pi-cpp/settings.json");
-    std::ifstream file(settings_path);
-    ASSERT_TRUE(file.is_open());
-    const Json json = Json::parse(file);
-    EXPECT_FALSE(json.contains("model"));
-}
-
-TEST_F(SettingsTest, CustomModelsFallBackToEnvBaseUrl)
-{
-    ScopedEnvVar pi_key("PI_API_KEY");
-    ScopedEnvVar deepseek_key("DEEPSEEK_API_KEY");
-    ScopedEnvVar openai_key("OPENAI_API_KEY");
-    ScopedEnvVar pi_base("PI_BASE_URL");
-    ScopedEnvVar pi_model("PI_MODEL");
+    ScopedEnvVar api_key("PI_API_KEY");
+    ScopedEnvVar base_url("PI_BASE_URL");
+    ScopedEnvVar model("PI_MODEL");
     ScopedCurrentPath cwd(home_);
-    ASSERT_EQ(setenv("PI_BASE_URL", "https://proxy.example/v1", 1), 0);
+
+    {
+        std::ofstream file(std::filesystem::path(home_) / ".env");
+        file << "PI_API_KEY=from-dotenv\nPI_BASE_URL=https://api.example.com\nPI_MODEL=model-x\n";
+    }
+
+    const auto settings = Settings::load();
+    EXPECT_EQ(settings.apiKey, "from-dotenv");
+    EXPECT_EQ(settings.baseUrl, "https://api.example.com/v1");
+    EXPECT_EQ(settings.model, "model-x");
+}
+
+TEST_F(SettingsTest, ProcessEnvOverridesDotEnv)
+{
+    ScopedEnvVar api_key("PI_API_KEY");
+    ScopedEnvVar model("PI_MODEL", "from-env");
+    ScopedCurrentPath cwd(home_);
+
+    {
+        std::ofstream file(std::filesystem::path(home_) / ".env");
+        file << "PI_MODEL=from-dotenv\n";
+    }
+
+    EXPECT_EQ(Settings::load().model, "from-env");
+}
+
+TEST_F(SettingsTest, IgnoresSettingsJson)
+{
+    // settings.json 不再被读取：旧文件里的 model/theme 等键不影响运行配置
+    ScopedEnvVar api_key("PI_API_KEY");
+    ScopedEnvVar base_url("PI_BASE_URL");
+    ScopedEnvVar model("PI_MODEL");
+    ScopedEnvVar theme("PI_THEME");
+    ScopedCurrentPath cwd(home_);
 
     const auto dir = std::filesystem::path(home_) / ".pi-cpp";
     std::filesystem::create_directories(dir);
     {
         std::ofstream file(dir / "settings.json");
-        // 模型未显式给 baseUrl → 应回退到 env 的 PI_BASE_URL（而不是代码默认值）
-        file << R"({"baseUrl":"https://file.invalid","models":[{"id":"m1"}]})";
+        file << R"({"model":"file-model","theme":"mono","sessionsRoot":"/tmp/file-sessions"})";
     }
 
-    const auto loaded = Settings::load();
-    EXPECT_EQ(loaded.baseUrl, "https://proxy.example/v1");
-    ASSERT_EQ(loaded.models.size(), 1U);
-    EXPECT_EQ(loaded.models[0].baseUrl, "https://proxy.example/v1");
-}
-
-TEST_F(SettingsTest, PersistsCustomModelsAndExtendedConfig)
-{
-    Settings settings;
-    settings.sessionsRoot = "~/.custom-sessions";
-    settings.theme = "mono";
-    settings.systemPrompt = "custom system prompt";
-    ModelInfo custom;
-    custom.id = "qwen2.5-coder";
-    custom.name = "Qwen 2.5 Coder";
-    custom.baseUrl = "http://localhost:11434/v1";
-    custom.provider = "custom";
-    custom.contextWindow = 32768;
-    custom.maxTokens = 8192;
-    settings.models.push_back(custom);
-    settings.compaction.reserveTokens = 8000;
-    settings.compaction.keepRecentTokens = 10000;
-    settings.webSearch.model = "deepseek-v4-pro";
-    settings.webSearch.maxTokens = 2048;
-    settings.save();
-
-    const auto loaded = Settings::load();
-    EXPECT_EQ(loaded.sessionsRoot, "~/.custom-sessions");
-    EXPECT_EQ(loaded.theme, "mono");
-    EXPECT_EQ(loaded.systemPrompt, "custom system prompt");
-    ASSERT_EQ(loaded.models.size(), 1u);
-    EXPECT_EQ(loaded.models[0].id, "qwen2.5-coder");
-    EXPECT_EQ(loaded.models[0].name, "Qwen 2.5 Coder");
-    EXPECT_EQ(loaded.models[0].baseUrl, "http://localhost:11434/v1");
-    EXPECT_EQ(loaded.models[0].provider, "custom");
-    EXPECT_EQ(loaded.models[0].contextWindow, 32768);
-    EXPECT_EQ(loaded.models[0].maxTokens, 8192);
-    EXPECT_EQ(loaded.compaction.reserveTokens, 8000);
-    EXPECT_EQ(loaded.compaction.keepRecentTokens, 10000);
-    EXPECT_EQ(loaded.webSearch.model, "deepseek-v4-pro");
-    EXPECT_EQ(loaded.webSearch.maxTokens, 2048);
+    const auto settings = Settings::load();
+    EXPECT_TRUE(settings.model.empty());
+    EXPECT_EQ(settings.theme, "default");
+    EXPECT_EQ(settings.sessionsRoot, "~/.pi-cpp/agent/sessions");
 }
 
 }  // namespace

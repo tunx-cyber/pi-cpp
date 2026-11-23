@@ -42,8 +42,8 @@ pi-cpp/
 ### 2.2 模型表与远端列表（model_registry / model_list）
 
 - 静态表：`deepseek-v4-flash` 与 `deepseek-v4-pro`（1M 上下文、maxTokens 384k、支持思考），`thinkingLevelMap = {minimal:null, low:null, medium:null, high:"high", xhigh:"max"}`。表内只有元数据，不含价格，**也不作为默认模型**：它只用于补全注册表内 id 的上下文窗口/reasoning 等元数据。
-- `register_model` 支持运行时 override（settings.json 自定义模型场景）。
-- **可用模型与默认模型都以端点为准**：`model_list.h` 的 `list_remote_models` 调用 OpenAI 兼容的 `GET {baseUrl}/models`（`parse_model_list_response` 可单测）。`AgentSession::ensure_model` 在「没有已配置/已保存模型」时取列表第一个模型作为默认模型（不写回 settings.json）；`/model` 选择器与 Ctrl+P 使用同一列表，`/model` 请求失败或列表为空时 Ctrl+P 才回退内置表。远端 id 若不在注册表（没有上下文窗口/reasoning 等元数据），切换时按 `make_custom_model` 合成 ModelInfo（沿用全局 baseUrl，reasoning=false、保守上下文默认值），恢复会话时也按默认模型结构还原该 id。
+- 注册表是只读的内置表（deepseek-v4-flash / deepseek-v4-pro），运行时不再注册自定义模型。
+- **可用模型与默认模型都以端点为准**：`model_list.h` 的 `list_remote_models` 调用 OpenAI 兼容的 `GET {baseUrl}/models`（`parse_model_list_response` 可单测）。`AgentSession::ensure_model` 每次启动都用端点列表校验配置的模型（不在列表时改用第一个对话模型，持久化状态不外写）；`/model` 选择器与 Ctrl+P 使用同一列表，`/model` 请求失败或列表为空时 Ctrl+P 才回退内置表。远端 id 若不在注册表（没有上下文窗口/reasoning 等元数据），切换时按 `make_custom_model` 合成 ModelInfo（沿用全局 baseUrl，reasoning=false、保守上下文默认值），恢复会话时也按默认模型结构还原该 id。
 - **远端模型的能力推断**：`GET /models` 只返回 id，不含 reasoning/上下文窗口。`find_model_template(id, baseUrl)` 先按「id 前缀 == 已注册 provider」匹配家族（`deepseek-flash` → deepseek，多个候选取与目标 id 公共前缀最长的一个），再按「端点 host == 已注册模型 host」匹配；命中则继承该模型的 `reasoning` / `thinkingLevelMap` / `contextWindow` / `maxTokens`（`make_custom_model` 与 `AgentHarness::reload` 共用）。两者都没有才退回保守默认值（reasoning=false、131072 上下文）。否则远端 deepseek 模型会被错误当成纯文本模型，`/thinking` 只能显示 off。
 - **不做 thinking 能力校验**：不再根据模型元数据过滤/回退级别（`get_supported_thinking_levels`/`clamp_thinking_level` 已删除）。`thinkingLevelMap` 只用于 wire 映射（如 high→"high"、xhigh→"max"，无映射时原样发送级别名）；模型是否支持由真实请求决定，错误直接显示给用户并提示可用 `/thinking` 调整。
 
@@ -232,36 +232,32 @@ JSONL 格式（pi 兼容 version-3）：
 
 ## 5. app 层
 
-### 5.1 settings + .env
+### 5.1 settings（只读环境变量）
 
-`~/.pi-cpp/settings.json`：
+`Settings` 只有 8 个字段，全部来自环境变量；**没有配置文件**（`~/.pi-cpp/settings.json` 已废弃，代码不再读写它，旧文件会被忽略）。
 
-```json
-{
-  "model": "deepseek-v4-flash",
-  "thinking": "off",
-  "sessionsRoot": "~/.pi-cpp/agent/sessions",
-  "systemPrompt": "You are pi-cpp, a helpful coding assistant in a terminal.",
-  "models": [
-    { "id": "qwen2.5-coder", "name": "Qwen 2.5 Coder",
-      "baseUrl": "http://localhost:11434/v1",
-      "contextWindow": 32768, "maxTokens": 8192, "reasoning": false }
-  ],
-  "theme": "default",
-  "compaction": { "reserveTokens": 16384, "keepRecentTokens": 20000 },
-  "webSearch": { "baseUrl": "https://api.deepseek.com/anthropic/v1",
-    "model": "deepseek-flash", "maxTokens": 512, "maxResults": 8 },
-  "byCwd": { "/path/to/project": {"model": "deepseek-v4-pro", "thinking": "high"} }
-}
-```
+| 变量 | 字段 | 说明 |
+|---|---|---|
+| `PI_API_KEY` | `apiKey` | 最高优先级 |
+| `OPENAI_API_KEY` | `apiKey` | 回退 |
+| `PI_BASE_URL` | `baseUrl` | 默认 `https://api.deepseek.com`；规范化见下 |
+| `PI_MODEL` | `model` | 空表示由端点决定 |
+| `PI_THINKING` | `thinking` | off/minimal/low/medium/high/xhigh |
+| `PI_SESSIONS_ROOT` | `sessionsRoot` | 默认 `~/.pi-cpp/agent/sessions` |
+| `PI_SYSTEM_PROMPT` | `systemPrompt` | 覆盖内置 base 提示词 |
+| `PI_THEME` | `theme` | default / mono |
 
-API key 只来自 env/.env：`PI_API_KEY` > `DEEPSEEK_API_KEY` > `OPENAI_API_KEY`，每个变量依次查「进程环境变量 → 项目根 `.env` → `~/.pi-cpp/.env`」（`.env` 解析支持注释/引号/空白）。**全局端点只来自 `PI_BASE_URL`，默认值在 `settings.h`（`Settings::baseUrl = "https://api.deepseek.com"`，加载时规范化为 `…/v1`）；端点地址会做规范化：去掉尾部斜杠，只有 `scheme://host[:port]`（无路径）时自动补 `/v1`（如 `https://api.xiaomimimo.com` → `https://api.xiaomimimo.com/v1`），带路径的地址（`…/openai/v1`、`…/anthropic/v1`）原样保留；`apiKey` / `baseUrl` 均不从 settings.json 读取**，旧文件中的这两个键会被忽略并在下次保存时移除。`PI_MODEL` 环境变量可覆盖模型；模型选择按 cwd 持久化（`set_override` 写 `byCwd`），重启后 `resume` 恢复。**`model` 键可省略**（代码里没有默认模型 id）：省略时启动阶段用 `GET /models` 的第一个模型，且该自动探测结果只保留在进程内（`current_model_id_`），后续 `/thinking` 等写配置动作也不会把它持久化；只有用户主动 `/model` 选择才会写 settings.json。**每次启动都会向端点 `GET /models` 校验一次**：配置的模型在列表里就保留；不在列表（换了 baseUrl、或恢复的旧会话记录）时自动改用端点里第一个非语音/非向量模型（跳过 `asr`/`tts`/`embed` 等条目），并打印一行提示；端点不可达时沿用已配置模型，只有连一个模型都没有才报错。settings.json 的 `models[]` 仍可为自定义模型单独指定 `baseUrl`（见下）。
+每个变量依次查「进程环境变量 → 项目根 `.env`（从 cwd 向上找最近的） → `~/.pi-cpp/.env` → `settings.h` 默认值」（`.env` 解析支持注释/引号/空白）。因此 shell 里 export 的 `PI_BASE_URL` 会盖过 `.env`，改 `.env` 后务必确认没有残留 export（交互模式启动行会打印实际端点）。
 
-金额与单价配置已移除：单价随时变动且无法由客户端确定，用量只统计四项 token（`/cost` 查看）。旧版 settings.json 中的 costInput / costOutput / costCacheRead / costCacheWrite 键不再读取，保留也不会报错。
+端点规范化（`normalize_base_url`）：去掉尾部斜杠；只有 `scheme://host[:port]`（没有路径）时补 `/v1`，例如 `https://api.xiaomimimo.com` → `https://api.xiaomimimo.com/v1`；带路径的地址（`…/openai/v1`、`…/anthropic/v1`）原样保留。
 
-models 数组：定义自定义模型（id 必填；name/baseUrl/contextWindow/maxTokens/reasoning 等可选；缺省 baseUrl 回退到全局 baseUrl，reasoning 默认 false）。同名 id 覆盖内置模型；这些模型会出现在 /model 列表并可切换，Ctrl+P 循环切换全部模型。自定义模型使用自身 baseUrl（内置模型仍跟随全局 baseUrl/PI_BASE_URL）。**注意**：/model 的无参列表与 Ctrl+P 优先使用端点 `GET /models` 的返回结果；settings.json 中的自定义模型主要用于补全元数据，并在 /models 请求失败时作为回退列表。
+模型与 thinking 的运行期状态：`AgentSession` 持有 `Settings` 副本 + `current_model_id_`。`/model`、`/thinking` 只改内存并写会话 JSONL 的 `model_change` / `thinking_level_change` 条目（`--resume` 时恢复），不落任何配置文件；`PI_MODEL` / `PI_THINKING` 是启动默认值。
 
-compaction 对象：reserveTokens/keepRecentTokens 只影响手动 `/compact` 的切点（不再有自动压缩；旧 `enabled` 键会被忽略）。theme 选择终端主题（default / mono，未知名称回退 default；`NO_COLOR` 环境变量强制 mono）。systemPrompt 覆盖系统提示词 base。webSearch 对象：baseUrl/model/maxTokens/maxResults 控制 web_search 工具（baseUrl 仍可被环境变量 DEEPSEEK_SEARCH_BASE_URL 覆盖；旧 `maxUses` 键已移除——服务端 `deepseek_web_search` 不接受该参数，保留也不报错）。web_search 的实现是“嵌套一次 Messages 请求”：声明 `deepseek_web_search` 服务端工具并显式 `thinking: {"type": "disabled"}`（开启思考会变成深度思考搜索，一次工具调用要跑十几步 open_page/find_in_page），客户端只解析 `web_search_tool_result` 块里的 `title/url/snippet/page_age`。模型没有联网（只有 text 块）时把正文当结果返回，`web_search_tool_result_error` 的 `error_code` 作为错误上报。sessionsRoot 指定会话存储目录。
+**`ensure_model` 每次启动都向端点 `GET /models` 校验一次**：配置的模型在列表里就保留；不在列表（换了端点/key、或恢复的旧会话记录）时改用端点里第一个对话模型（跳过 `asr`/`tts`/`voice`/`embed` 等非对话条目），并把提示写入 `noticeOut` 由入口打印；端点不可达时沿用已配置模型，只有连一个模型都没有才报错。自动选择的结果只在进程内（`current_model_id_`）。
+
+金额与单价配置已移除：单价随时变动且无法由客户端确定，用量只统计四项 token（`/cost` 查看）。
+
+compaction 参数（`CompactionSettings`）与 web_search 参数（`WebSearchConfig`）改用结构体默认值，没有配置文件/environment 覆盖入口；`DEEPSEEK_SEARCH_BASE_URL` 环境变量仍可覆盖 web_search 的端点。web_search 的实现是“嵌套一次 Messages 请求”：声明 `deepseek_web_search` 服务端工具并显式 `thinking: {"type": "disabled"}`（开启思考会变成深度思考搜索，一次工具调用要跑十几步 open_page/find_in_page），客户端只解析 `web_search_tool_result` 块里的 `title/url/snippet/page_age`。模型没有联网（只有 text 块）时把正文当结果返回，`web_search_tool_result_error` 的 `error_code` 作为错误上报。
 
 ### 5.2 图片（images.cpp）
 
@@ -280,7 +276,7 @@ stb_image 解码（强制 RGBA）→ 最长边 >2000px 时 stb_image_resize2 等
 - 空闲快捷键：Ctrl+P=循环切换模型（优先端点 `GET /models` 列表，失败回退内置表）、Ctrl+C=退出。
 - 状态栏：`[model=..] [thinking=..] [mem <驻留内存> peak=..]`；模型未确定时显示 `[model=未选择]`，此时普通输入会被拦下并提示用 `/model` 选择（避免向端点发送空 model）。单价无法确定，状态栏不显示金额；token 用量用 `/cost` 按需查看。内存指标针对实际运行的 `picpp` 进程；Linux 读取 `/proc/self/status` 的 `VmRSS`；macOS 用 `task_vm_info` 的 `phys_footprint`（与「活动监视器」同口径，含压缩页）。
 - 启动默认**新会话**（每次启动一个 JSONL 文件）；`--resume [id]` 或 `/resume` 恢复后回放完整对话（用户/助手文本、工具调用与工具结果，单条展示上限约 2000 字符）。
-- 主题：`theme` 结构体集中在 `include/pi/app/theme.h`（提示符/用户/工具/错误/次要信息），目前内置 default 与 mono，settings.json 的 `theme` 键预留自定义扩展。
+- 主题：`theme` 结构体集中在 `include/pi/app/theme.h`（提示符/用户/工具/错误/次要信息），目前内置 default 与 mono，用 `PI_THEME` 选择（预留自定义扩展）。
 - `/thinking` 与 `/model` 一致：无参数打开 ↑/↓ 选择器（off/minimal/low/medium/high/xhigh），Enter 确认、Esc 取消；`/thinking <级别>` 直接设置。不做模型能力校验，真实请求报错时终端提示“可能是模型不支持该 thinking 级别”。
 - slash 命令：/help /model /thinking /compact /clear /new /resume /sessions /image /tools /skills /memory /cost /context /quit + 用户模板（`~/.pi-cpp/templates/<name>.md` → `/<name> 参数`）。`/context` 用 `estimate_context_tokens`（字符数/4、图片 4800）显示当前上下文估算与模型上限占用；`/cost` 显示当前会话、最近一次调用与进程累计的 input/output/cacheRead/cacheWrite/total 五项 token 数（不换算金额）。`/clear` 新建会话文件（只清内存会让 `/resume` 把旧历史带回来）；编码工具在启动时装配（一次性与交互模式一致），`/tools` 仅重新加载；skills 在 AgentHarness 构造时注入 system prompt。
 - 管道模式（非 TTY 或带参数）：`picpp "prompt" [--image path]`，订阅事件流式打印 + usage 行；退出前 kill 全部子进程组，避免 bash 工具遗留孤儿进程。
@@ -402,7 +398,7 @@ Linux 上若 TSan 在启动时报 `unexpected memory mapping`，可用
 
 | 改动 | 位置 |
 |---|---|
-| 内置模型 | `src/ai/model_registry.cpp` 的 `build_builtin_models()`；运行时 override 用 `register_model` |
+| 内置模型 | `src/ai/model_registry.cpp` 的 `build_builtin_models()`（只读表，没有运行时注册） |
 | 端点兼容 | `src/ai/openai_transport.cpp` 的 `detect_compat`（只有 DeepSeek/通用两类，新增 provider 时再加分支并补测试） |
 | 编码工具 | `src/app/commands.cpp` 的 `make_coding_tools`（schema 由内置 JSON Schema 校验器自动校验；`executionMode=Sequential` 可强制串行）。web_fetch 走 libcurl，详见 §12.1 第 7 条契约 |
 | slash 命令 | `src/app/repl_commands.cpp` 的 `handle_command`（按现有 if 链追加）；用户模板放 `~/.pi-cpp/templates/<name>.md` |

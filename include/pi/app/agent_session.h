@@ -39,15 +39,9 @@ class AgentSession
     void abort();
 
     void set_tools(std::vector<AgentTool> tools);
-    /** 切换模型（按 cwd 持久化）。注册表里没有的 id（如 /models 返回的远端模型）按自定义模型接入。
-     */
+    /** 切换模型（只影响本次会话，切换记录写进会话 JSONL）。注册表里没有的 id（如
+     *  /models 返回的远端模型）按自定义模型接入。 */
     void set_model(const std::string& modelId);
-    /**
-     * 确定当前模型：已有模型（会话记录 / settings.json / PI_MODEL）时直接返回；
-     * 否则取端点 `GET /models` 返回的第一个模型作为默认模型（不写入 settings.json）。
-     * 失败时返回 false 并写入 errorOut（端点不可达 / 未返回任何模型）。
-     * 前置条件：会话已创建或恢复（需要向会话写入模型切换记录）。
-     */
     /**
      * 确定当前模型：总是向端点 `GET /models` 探测一次。
      * - 已配置模型出现在端点列表中 → 保留；
@@ -56,7 +50,7 @@ class AgentSession
      * - 端点不可用 → 沿用已配置模型，只有连一个模型都没有时才失败。
      */
     bool ensure_model(std::string* errorOut = nullptr, std::string* noticeOut = nullptr);
-    /** 切换 thinking（按 cwd 持久化）。 */
+    /** 切换 thinking（只影响本次会话，切换记录写进会话 JSONL）。 */
     void set_thinking(ThinkingLevel level);
     bool compact(std::string* errorOut = nullptr);
 
@@ -80,20 +74,19 @@ class AgentSession
     const std::string& api_key() const { return settings_.apiKey; }
     /** OpenAI 兼容端点（/models 与 chat/completions 共用）。 */
     const std::string& base_url() const { return settings_.baseUrl; }
-    const WebSearchConfig& web_search_config() const { return settings_.webSearch; }
 
     std::function<void()> subscribe(AgentEventListener listener);
 
    private:
     std::optional<std::string> resolve_api_key() const;
-    /** 已配置的模型（settings.json / byCwd / PI_MODEL）；未配置返回 nullopt。 */
+    /** 已配置的模型（PI_MODEL / 本会话的切换）；未配置返回 nullopt。 */
     std::optional<ModelInfo> resolve_model() const;
     bool open_and_load(const SessionMetadata& metadata, std::string* errorOut);
     void reset_session_usage();
 
     Settings settings_;
     std::string cwd_;
-    /** ensure_model 自动探测出的模型 id：只在进程内有效，不写入 settings.json。 */
+    /** 自动探测/切换出的模型 id：只在进程内有效，新会话沿用它。 */
     std::string current_model_id_;
     PosixFileSystem fs_;
     JsonlSessionRepo repo_;

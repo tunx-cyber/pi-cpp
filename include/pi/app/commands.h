@@ -26,7 +26,7 @@ struct WebSearchResult
     std::string error;  // 失败信息；成功时为空
 };
 
-/** web_search 的可配置参数（来自 settings.json 的 webSearch 对象）。 */
+/** web_search 的可配置参数（代码默认值；目前没有 env/配置文件覆盖）。 */
 struct WebSearchConfig
 {
     std::string baseUrl = "https://api.deepseek.com/anthropic/v1";

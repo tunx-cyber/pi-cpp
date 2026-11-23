@@ -30,24 +30,6 @@ TEST(ModelRegistryTest, UnknownModelReturnsNullopt)
     EXPECT_FALSE(get_model("does-not-exist").has_value());
 }
 
-TEST(ModelRegistryTest, RegisterOverrideTakesPrecedence)
-{
-    const auto builtin = get_model("deepseek-v4-flash");
-    ASSERT_TRUE(builtin.has_value());
-    ModelInfo custom;
-    custom.id = "deepseek-v4-flash";
-    custom.name = "Custom Flash";
-    custom.provider = "custom";
-    custom.baseUrl = "http://localhost:9999";
-    register_model(custom);
-    const auto model = get_model("deepseek-v4-flash");
-    ASSERT_TRUE(model.has_value());
-    EXPECT_EQ(model->name, "Custom Flash");
-    EXPECT_EQ(model->baseUrl, "http://localhost:9999");
-    unregister_model("deepseek-v4-flash");
-    register_model(*builtin);  // 恢复内置模型，避免污染后续测试
-}
-
 TEST(ModelRegistryTest, InfersFamilyTemplateFromModelId)
 {
     // GET /models 只返回 id：deepseek-flash 应继承 deepseek 家族的能力（含思考支持）

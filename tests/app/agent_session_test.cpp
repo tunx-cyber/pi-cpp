@@ -59,7 +59,7 @@ class ScopedCurrentPath
     std::filesystem::path old_;
 };
 
-/** 临时 HOME（设置写入 ~/.pi-cpp/settings.json，测试不能污染真实配置）。 */
+/** 临时 HOME（避免测试读到/写入真实的 ~/.pi-cpp）。 */
 class ScopedHome
 {
    public:
@@ -339,9 +339,9 @@ TEST(AgentSessionModelsTest, NewSessionStartsFreshTranscript)
     EXPECT_TRUE(session.messages().empty());
 }
 
-TEST(AgentSessionModelsTest, AutoDetectedModelIsNotPersisted)
+TEST(AgentSessionModelsTest, DoesNotWriteSettingsJson)
 {
-    // ensure_model 的探测结果只在进程内有效：后续 /thinking 写配置时不能把它落盘
+    // settings.json 已废弃：切换模型 / thinking 只写会话 JSONL，不再落配置文件
     ScopedHome home;
     ScopedEnvVar pi_model("PI_MODEL");
     ScopedCurrentPath cwd(home.path());
@@ -360,11 +360,10 @@ TEST(AgentSessionModelsTest, AutoDetectedModelIsNotPersisted)
     std::string error;
     ASSERT_TRUE(session.ensure_model(&error)) << error;
     session.set_thinking(ThinkingLevel::High);
+    session.set_model("model-b");
 
-    const auto loaded = Settings::load();
-    EXPECT_TRUE(loaded.model.empty());
-    const auto override = loaded.override_for("/tmp/pi-agent-session-test-cwd-autopersist");
-    if (override) EXPECT_FALSE(override->model.has_value());
+    EXPECT_FALSE(
+        std::filesystem::exists(std::filesystem::path(home.path()) / ".pi-cpp" / "settings.json"));
 }
 
 TEST(AgentSessionModelsTest, ThinkingLevelIsNotClampedByModel)
@@ -386,24 +385,21 @@ TEST(AgentSessionModelsTest, ThinkingLevelIsNotClampedByModel)
     EXPECT_EQ(session.thinking_level(), ThinkingLevel::Medium);
 }
 
-TEST(AgentSessionModelsTest, KeepsCwdModelOverrideWhenChangingThinking)
+TEST(AgentSessionModelsTest, SetThinkingKeepsCurrentModel)
 {
-    // 先 /model 再 /thinking 不应丢掉按 cwd 保存的模型选择
+    // 没有 cwd 持久化了：先 /model 再 /thinking 不能把当前模型改回去
     ScopedHome home;
     Settings settings;
     settings.baseUrl = "http://127.0.0.1:1";  // 已有模型，不会请求端点
-    settings.model = "deepseek-v4-pro";
+    settings.model = "deepseek-flash";
+    settings.sessionsRoot = home.path() + "/sessions";
     AgentSession session(settings, "/tmp/pi-agent-session-test-cwd-thinking");
     session.new_session();
-    session.set_model("deepseek-v4-pro");
+    session.set_model("model-x");
     session.set_thinking(ThinkingLevel::Off);
 
-    const auto override = Settings::load().override_for("/tmp/pi-agent-session-test-cwd-thinking");
-    ASSERT_TRUE(override.has_value());
-    ASSERT_TRUE(override->model.has_value());
-    EXPECT_EQ(*override->model, "deepseek-v4-pro");
-    ASSERT_TRUE(override->thinking.has_value());
-    EXPECT_EQ(*override->thinking, ThinkingLevel::Off);
+    EXPECT_EQ(session.model().id, "model-x");
+    EXPECT_EQ(session.thinking_level(), ThinkingLevel::Off);
 }
 
 }  // namespace

@@ -2,6 +2,23 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式（无版本号，按日期记录）。
 
+## 2026-11-23（一）去掉 settings.json：配置只用环境变量
+
+### 变更
+
+- **删除 `~/.pi-cpp/settings.json` 支持**：`Settings` 从 12 个字段缩到 8 个（apiKey / baseUrl / model / thinking / sessionsRoot / systemPrompt / theme），全部只从环境变量读取；`save()` / `set_override()` / `byCwd` / `override_for()` / `models[]` 自定义模型表全部删除。旧文件留在磁盘上也**完全不会被读取**，可以删掉。
+- **新增环境变量**：`PI_THINKING`（thinking 级别）、`PI_SESSIONS_ROOT`、`PI_SYSTEM_PROMPT`、`PI_THEME`；查找顺序仍是「进程环境变量 → 项目 `.env` → `~/.pi-cpp/.env` → 代码默认值」。
+- **`/model`、`/thinking` 不再落盘**：只改内存并写会话 JSONL（`model_change` / `thinking_level_change`），`--resume` 时恢复；想改默认值用 `PI_MODEL` / `PI_THINKING`。
+- **移除 `DEEPSEEK_API_KEY`**：只认 `PI_API_KEY` > `OPENAI_API_KEY`（上一版刚加的回退一并删掉）。
+- **model_registry 变只读**：删除 `register_model` / `unregister_model` 及互斥锁（自定义模型此前只来自 settings.json）。
+- `web_search` / compaction 参数改用结构体默认值（不再有配置文件入口）；`DEEPSEEK_SEARCH_BASE_URL` 仍是 web_search 端点的环境变量覆盖。
+- 顺手修掉两个遗留问题：`mentions_thinking` 提示重新接到错误输出（请求报错提到 thinking/reasoning 时提示 `/thinking`）；`agent_loop.cpp` 四个未使用参数改为匿名，`-Wextra` 下不再报警。
+
+### 测试
+
+- `settings_test.cpp` 重写为环境变量语义（默认值、key 优先级、baseUrl 规范化、`.env` 读取与覆盖、`settings.json` 被忽略）；`agent_session_test` 的持久化用例改为断言"不写配置文件"。
+- 全套 193 项：192 通过 + 1 跳过；`check_format.py`（clang-format 18）通过；全量重建无警告。
+
 ## 2026-11-23（一）换端点后自动重选模型 + baseUrl 规范化
 
 ### 修复（补）

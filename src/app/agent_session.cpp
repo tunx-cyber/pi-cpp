@@ -18,7 +18,7 @@ namespace
 {
 
 /**
- * 注册表里没有的模型（GET /models 返回的远端模型 / settings.json 里只有 id 的条目）。
+ * 注册表里没有的模型（GET /models 返回的远端模型）。
  * 优先继承同族模型的能力模板：端点只返回 id，不带 reasoning/上下文窗口，
  * 若一律按纯文本模型处理，支持思考的模型（如 deepseek-flash）就会被错误限制成
  * thinking=off。找不到同族模型时才退回保守默认值。
@@ -78,25 +78,17 @@ void accumulate_usage(Usage& target, const Usage& delta)
 AgentHarnessOptions build_harness_options(const Settings& settings, const std::string& cwd)
 {
     AgentHarnessOptions options;
-    // 注册 settings.json 里自定义模型（同名覆盖内置；幂等）。
-    for (const auto& model : settings.models) register_model(model);
-
-    std::string model_id = settings.model;
-    if (const auto override = settings.override_for(cwd))
-    {
-        if (override->model) model_id = *override->model;
-    }
-    // 未指定模型时保持空 ModelInfo：真正的默认模型由 ensure_model() 通过
+    // 未指定模型（PI_MODEL）时保持空 ModelInfo：真正的默认模型由 ensure_model() 通过
     // GET /models 确定（代码里不写死任何模型 id）。
-    if (!model_id.empty())
+    if (!settings.model.empty())
     {
-        if (const auto model = get_model(model_id))
+        if (const auto model = get_model(settings.model))
         {
             options.model = *model;
         }
         else
         {
-            options.model = make_custom_model(model_id, settings.baseUrl);
+            options.model = make_custom_model(settings.model, settings.baseUrl);
         }
     }
     options.thinkingLevel = settings.thinking;
@@ -105,7 +97,6 @@ AgentHarnessOptions build_harness_options(const Settings& settings, const std::s
         return settings.apiKey.empty() ? std::nullopt : std::optional<std::string>(settings.apiKey);
     };
     options.systemPromptBase = settings.systemPrompt;
-    options.compactionSettings = settings.compaction;
     // 技能清单写进 system prompt（模型按 location 自行 read SKILL.md）。
     // 此前 options.skills 从未赋值：/skills 只打印列表，模型完全看不到技能。
     PosixFileSystem fs(cwd);
@@ -147,11 +138,7 @@ std::optional<std::string> AgentSession::resolve_api_key() const
 std::optional<ModelInfo> AgentSession::resolve_model() const
 {
     std::string model_id = settings_.model;
-    if (const auto override = settings_.override_for(cwd_))
-    {
-        if (override->model) model_id = *override->model;
-    }
-    // 自动探测出的模型只在进程内有效（不落盘），新建会话时沿用它。
+    // 自动探测/切换出的模型只在进程内有效，新建会话时沿用它。
     if (model_id.empty()) model_id = current_model_id_;
     if (model_id.empty()) return std::nullopt;
     if (const auto model = get_model(model_id)) return *model;
@@ -371,18 +358,12 @@ void AgentSession::set_model(const std::string& modelId)
     settings_.model = modelId;
     current_model_id_ = modelId;
     // thinking 不做能力校验：真实请求失败时再把错误报给用户。
-    settings_.set_override(cwd_, modelId, std::nullopt);
 }
 
 void AgentSession::set_thinking(ThinkingLevel level)
 {
     harness_.set_thinking_level(level);
     settings_.thinking = level;
-    // 保留该 cwd 已有的模型覆盖：set_override 传 nullopt 会删掉 model 键，
-    // 导致"先 /model 再 /thinking"悄悄丢掉按目录保存的模型选择。
-    std::optional<std::string> model_override;
-    if (const auto existing = settings_.override_for(cwd_)) model_override = existing->model;
-    settings_.set_override(cwd_, model_override, level);
 }
 
 bool AgentSession::compact(std::string* errorOut) { return harness_.compact(errorOut); }
