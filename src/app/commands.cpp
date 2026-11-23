@@ -292,7 +292,7 @@ WebSearchResult deepseek_web_search(const std::string& query, const std::string&
     if (apiKey.empty())
     {
         result.error =
-            "Missing API key. Set PI_API_KEY or DEEPSEEK_API_KEY before using web_search.";
+            "Missing API key. Set PI_API_KEY (or OPENAI_API_KEY) before using web_search.";
         return result;
     }
 

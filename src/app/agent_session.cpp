@@ -158,7 +158,7 @@ bool AgentSession::ensure_model(std::string* errorOut, std::string* noticeOut)
         // 端点返回 401/403 时最常见的根因是凭据缺失，直接给出可执行的提示。
         if (settings_.apiKey.empty())
         {
-            reason += "（未配置 API key：PI_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY）";
+            reason += "（未配置 API key：PI_API_KEY / OPENAI_API_KEY）";
         }
         if (errorOut) *errorOut = reason;
         return false;

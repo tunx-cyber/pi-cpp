@@ -435,8 +435,7 @@ class OpenAiCompletionsTransport::Impl
         {
             output.stopReason = StopReason::Error;
             output.errorMessage =
-                "Missing API key. Set PI_API_KEY, DEEPSEEK_API_KEY, or OPENAI_API_KEY before "
-                "sending a prompt.";
+                "Missing API key. Set PI_API_KEY (or OPENAI_API_KEY) before sending a prompt.";
             StreamEvent error;
             error.type = StreamEvent::Type::Error;
             error.reason = StopReason::Error;
