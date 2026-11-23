@@ -239,8 +239,11 @@ Settings Settings::load()
     // apiKey 与全局端点只来自 env 与 settings.h 的默认值。先应用 env，
     // 让 settings.json 中未显式给 baseUrl 的自定义模型回退到实际端点。
     const std::string env_key = get_env_value("PI_API_KEY");
+    const std::string deepseek_key = get_env_value("DEEPSEEK_API_KEY");
     const std::string openai_key = get_env_value("OPENAI_API_KEY");
     if (!env_key.empty()) settings.apiKey = env_key;
+    // 官方文档里常用 DEEPSEEK_API_KEY（各种集成都导出它），作为第二优先级回退
+    if (settings.apiKey.empty() && !deepseek_key.empty()) settings.apiKey = deepseek_key;
     if (settings.apiKey.empty() && !openai_key.empty()) settings.apiKey = openai_key;
     const std::string env_base = get_env_value("PI_BASE_URL");
     if (!env_base.empty()) settings.baseUrl = env_base;

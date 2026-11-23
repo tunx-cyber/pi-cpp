@@ -4,6 +4,11 @@
 
 ## 2026-11-23（一）换端点后自动重选模型 + baseUrl 规范化
 
+### 修复（补）
+
+- **`DEEPSEEK_API_KEY` 实际不生效**：文档、错误提示都写着支持，但 `Settings::load()` 只读 `PI_API_KEY` / `OPENAI_API_KEY`。现在按文档补上：`PI_API_KEY` > `DEEPSEEK_API_KEY` > `OPENAI_API_KEY`。
+
+
 ### 修复
 
 - **换了 `.env` 的 baseUrl/key 后模型仍是旧的**：`ensure_model()` 原来在“已有模型”时直接返回，端点 `GET /models` 从不被查询，配置里持久化的 `deepseek-flash` 就一直生效。现在每次启动都校验一次：配置的模型仍在端点列表里才保留，否则改用端点里的模型并打印一行提示（“配置的模型 X 不在端点 … 的模型列表中，已改用 Y”）。

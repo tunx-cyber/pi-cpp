@@ -147,6 +147,22 @@ TEST_F(SettingsTest, IgnoresApiCredentialsFromSettingsFile)
     EXPECT_EQ(loaded.model, "file-model");  // 其他键仍从 settings.json 读取
 }
 
+TEST_F(SettingsTest, FallsBackToDeepSeekApiKey)
+{
+    ScopedEnvVar pi_key("PI_API_KEY");
+    ScopedEnvVar deepseek_key("DEEPSEEK_API_KEY");
+    ScopedEnvVar openai_key("OPENAI_API_KEY");
+    ScopedEnvVar pi_base("PI_BASE_URL");
+    ScopedCurrentPath cwd(home_);
+
+    setenv("DEEPSEEK_API_KEY", "deepseek-key", 1);
+    EXPECT_EQ(Settings::load().apiKey, "deepseek-key");
+
+    // PI_API_KEY 优先于 DEEPSEEK_API_KEY
+    setenv("PI_API_KEY", "pi-key", 1);
+    EXPECT_EQ(Settings::load().apiKey, "pi-key");
+}
+
 TEST_F(SettingsTest, NormalizesBareBaseUrl)
 {
     ScopedEnvVar pi_base("PI_BASE_URL");
