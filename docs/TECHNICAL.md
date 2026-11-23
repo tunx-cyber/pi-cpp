@@ -255,7 +255,7 @@ JSONL 格式（pi 兼容 version-3）：
 }
 ```
 
-API key 只来自 env/.env：`PI_API_KEY` > `DEEPSEEK_API_KEY` > `OPENAI_API_KEY`，每个变量依次查「进程环境变量 → 项目根 `.env` → `~/.pi-cpp/.env`」（`.env` 解析支持注释/引号/空白）。**全局端点只来自 `PI_BASE_URL`，默认值在 `settings.h`（`Settings::baseUrl = "https://api.deepseek.com"`）；`apiKey` / `baseUrl` 均不从 settings.json 读取**，旧文件中的这两个键会被忽略并在下次保存时移除。`PI_MODEL` 环境变量可覆盖模型；模型选择按 cwd 持久化（`set_override` 写 `byCwd`），重启后 `resume` 恢复。**`model` 键可省略**（代码里没有默认模型 id）：省略时启动阶段用 `GET /models` 的第一个模型，且该自动探测结果只保留在进程内（`current_model_id_`），后续 `/thinking` 等写配置动作也不会把它持久化；只有用户主动 `/model` 选择才会写 settings.json。settings.json 的 `models[]` 仍可为自定义模型单独指定 `baseUrl`（见下）。
+API key 只来自 env/.env：`PI_API_KEY` > `DEEPSEEK_API_KEY` > `OPENAI_API_KEY`，每个变量依次查「进程环境变量 → 项目根 `.env` → `~/.pi-cpp/.env`」（`.env` 解析支持注释/引号/空白）。**全局端点只来自 `PI_BASE_URL`，默认值在 `settings.h`（`Settings::baseUrl = "https://api.deepseek.com"`，加载时规范化为 `…/v1`）；端点地址会做规范化：去掉尾部斜杠，只有 `scheme://host[:port]`（无路径）时自动补 `/v1`（如 `https://api.xiaomimimo.com` → `https://api.xiaomimimo.com/v1`），带路径的地址（`…/openai/v1`、`…/anthropic/v1`）原样保留；`apiKey` / `baseUrl` 均不从 settings.json 读取**，旧文件中的这两个键会被忽略并在下次保存时移除。`PI_MODEL` 环境变量可覆盖模型；模型选择按 cwd 持久化（`set_override` 写 `byCwd`），重启后 `resume` 恢复。**`model` 键可省略**（代码里没有默认模型 id）：省略时启动阶段用 `GET /models` 的第一个模型，且该自动探测结果只保留在进程内（`current_model_id_`），后续 `/thinking` 等写配置动作也不会把它持久化；只有用户主动 `/model` 选择才会写 settings.json。**每次启动都会向端点 `GET /models` 校验一次**：配置的模型在列表里就保留；不在列表（换了 baseUrl、或恢复的旧会话记录）时自动改用端点里第一个非语音/非向量模型（跳过 `asr`/`tts`/`embed` 等条目），并打印一行提示；端点不可达时沿用已配置模型，只有连一个模型都没有才报错。settings.json 的 `models[]` 仍可为自定义模型单独指定 `baseUrl`（见下）。
 
 金额与单价配置已移除：单价随时变动且无法由客户端确定，用量只统计四项 token（`/cost` 查看）。旧版 settings.json 中的 costInput / costOutput / costCacheRead / costCacheWrite 键不再读取，保留也不会报错。
 

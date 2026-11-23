@@ -142,8 +142,38 @@ TEST_F(SettingsTest, IgnoresApiCredentialsFromSettingsFile)
 
     const auto loaded = Settings::load();
     EXPECT_TRUE(loaded.apiKey.empty());
-    EXPECT_EQ(loaded.baseUrl, "https://api.deepseek.com");
+    // 默认端点按 OpenAI 兼容惯例规范化：裸域名补 /v1
+    EXPECT_EQ(loaded.baseUrl, "https://api.deepseek.com/v1");
     EXPECT_EQ(loaded.model, "file-model");  // 其他键仍从 settings.json 读取
+}
+
+TEST_F(SettingsTest, NormalizesBareBaseUrl)
+{
+    ScopedEnvVar pi_base("PI_BASE_URL");
+    ScopedEnvVar pi_key("PI_API_KEY");
+    ScopedCurrentPath cwd(home_);
+
+    const auto with_bare_host = []
+    {
+        setenv("PI_BASE_URL", "https://api.example.com", 1);
+        return Settings::load().baseUrl;
+    }();
+    EXPECT_EQ(with_bare_host, "https://api.example.com/v1");
+
+    const auto with_trailing_slash = []
+    {
+        setenv("PI_BASE_URL", "https://api.example.com/v1/", 1);
+        return Settings::load().baseUrl;
+    }();
+    EXPECT_EQ(with_trailing_slash, "https://api.example.com/v1");
+
+    // 带路径的端点原样保留（例如自建网关的 /openai/v1、Anthropic 的 /anthropic/v1）
+    const auto with_path = []
+    {
+        setenv("PI_BASE_URL", "https://gateway.example.com/openai/v1", 1);
+        return Settings::load().baseUrl;
+    }();
+    EXPECT_EQ(with_path, "https://gateway.example.com/openai/v1");
 }
 
 TEST_F(SettingsTest, DefaultsToNoModel)

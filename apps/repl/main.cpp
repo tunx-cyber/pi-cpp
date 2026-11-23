@@ -103,11 +103,13 @@ int run_app(int argc, char** argv)
         if (!open_session(session)) return 1;
         // 未显式配置模型时，默认模型由端点 GET /models 返回的第一个模型确定。
         std::string model_error;
-        if (!session.ensure_model(&model_error))
+        std::string model_notice;
+        if (!session.ensure_model(&model_error, &model_notice))
         {
             std::cerr << "无法确定模型：" << model_error << std::endl;
             return 1;
         }
+        if (!model_notice.empty()) std::cerr << model_notice << std::endl;
         session.set_tools(pi::make_coding_tools(cwd, settings.apiKey, settings.webSearch));
 
         // 流式输出到 stdout，结束打印 usage
@@ -165,9 +167,13 @@ int run_app(int argc, char** argv)
     // 用户可用 /model 重新拉取（或 /model <id> 直接指定）。
     {
         std::string model_error;
-        if (session.ensure_model(&model_error))
+        std::string model_notice;
+        if (session.ensure_model(&model_error, &model_notice))
         {
-            std::cout << "模型：" << session.model().id << std::endl;
+            if (!model_notice.empty()) std::cout << model_notice << std::endl;
+            // 一并显示端点：PI_BASE_URL 的 shell 环境变量会盖过 .env，写错时看不出用的是哪个
+            std::cout << "模型：" << session.model().id << "（" << settings.baseUrl << "）"
+                      << std::endl;
         }
         else
         {

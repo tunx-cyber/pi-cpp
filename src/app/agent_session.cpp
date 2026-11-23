@@ -2,6 +2,9 @@
 
 #include <unistd.h>
 
+#include <cctype>
+
+#include <algorithm>
 #include <stdexcept>
 
 #include "pi/agent/subagent_tool.h"
@@ -42,6 +45,24 @@ ModelInfo make_custom_model(const std::string& model_id, const std::string& base
     custom.contextWindow = 131072;
     custom.maxTokens = 32768;
     return custom;
+}
+
+/**
+ * 端点可能把语音/向量等非对话模型一起列出来（例如 mimo-v2.5-asr、*-tts-* 排在前面）。
+ * 自动选默认模型时跳过这些明显不是 chat 的条目，否则第一次请求就 400。
+ */
+bool looks_like_chat_model(const std::string& id)
+{
+    static const char* const kNonChat[] = {"asr",   "tts",    "whisper",    "voice", "speech",
+                                           "embed", "rerank", "moderation", "ocr",   "transcri"};
+    std::string lower = id;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const char* needle : kNonChat)
+    {
+        if (lower.find(needle) != std::string::npos) return false;
+    }
+    return true;
 }
 
 /** 把一轮消息的用量累加到 target（只统计四项 token，不累计金额）。 */
@@ -137,14 +158,15 @@ std::optional<ModelInfo> AgentSession::resolve_model() const
     return make_custom_model(model_id, settings_.baseUrl);
 }
 
-bool AgentSession::ensure_model(std::string* errorOut)
+bool AgentSession::ensure_model(std::string* errorOut, std::string* noticeOut)
 {
-    // 已有模型（会话记录 / settings.json / PI_MODEL）时不打扰端点。
-    if (!harness_.model().id.empty()) return true;
-
     const auto list = list_models();
+    const std::string configured = harness_.model().id;
+
     if (!list.error.empty())
     {
+        // 端点不可达（离线、代理、错误 baseUrl）：已有配置模型时先沿用，避免启动即失败
+        if (!configured.empty()) return true;
         std::string reason = "GET /models 失败：" + list.error;
         // 端点返回 401/403 时最常见的根因是凭据缺失，直接给出可执行的提示。
         if (settings_.apiKey.empty())
@@ -156,19 +178,41 @@ bool AgentSession::ensure_model(std::string* errorOut)
     }
     if (list.models.empty())
     {
-        if (errorOut) *errorOut = "端点未返回任何模型（GET /models 结果为空）";
+        if (!configured.empty()) return true;
+        if (errorOut) *errorOut = "端点没有返回任何模型（GET /models 结果为空）";
         return false;
     }
 
-    // 默认模型 = 端点返回的第一个模型。只记在进程内（current_model_id_），不写
-    // settings_.model：否则后续 /thinking 等写配置动作会把它一起持久化。
-    // 只有用户主动 /model 选择才按 cwd 持久化。
-    const std::string model_id = list.models.front().id;
+    // 配置的模型仍在端点列表里：保留（换端点后旧模型通常已不存在，见下）
+    const bool configured_available =
+        !configured.empty() &&
+        std::any_of(list.models.begin(), list.models.end(),
+                    [&](const RemoteModel& model) { return model.id == configured; });
+
+    if (configured_available)
+    {
+        current_model_id_ = configured;
+        return true;
+    }
+
+    // 没有配置，或配置的模型已不在端点（例如换了 baseUrl）：默认模型 = 端点里第一个
+    // 看起来像对话模型的条目（端点常把语音模型排在前面），全都像非对话模型时退回第一个。
+    // 只记在进程内（current_model_id_），不写 settings_.model：否则后续 /thinking 等
+    // 写配置动作会把它一起持久化。只有用户主动 /model 选择才按 cwd 持久化。
+    const auto pick =
+        std::find_if(list.models.begin(), list.models.end(),
+                     [](const RemoteModel& model) { return looks_like_chat_model(model.id); });
+    const std::string model_id = pick != list.models.end() ? pick->id : list.models.front().id;
     auto model = get_model(model_id);
     if (!model) model = make_custom_model(model_id, settings_.baseUrl);
 
     harness_.set_model(*model);
     current_model_id_ = model_id;
+    if (!configured.empty() && noticeOut)
+    {
+        *noticeOut = "配置的模型 " + configured + " 不在端点 " + settings_.baseUrl +
+                     " 的模型列表中，已改用 " + model_id + "（用 /model 可切换）";
+    }
     return true;
 }
 

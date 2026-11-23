@@ -100,6 +100,20 @@ std::string find_project_env_file()
     return ".env";
 }
 
+/**
+ * 端点地址规范化：去掉尾部斜杠；只有 `scheme://host[:port]`（没有路径）时按 OpenAI
+ * 兼容惯例补 `/v1`。例如 PI_BASE_URL=https://api.xiaomimimo.com → https://api.xiaomimimo.com/v1，
+ * 否则 `/models` 与 `/chat/completions` 会 404。带路径的地址（…/openai/v1、…/api）原样保留。
+ */
+std::string normalize_base_url(std::string url)
+{
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    const size_t scheme = url.find("://");
+    const size_t host_start = scheme == std::string::npos ? 0 : scheme + 3;
+    if (url.find('/', host_start) == std::string::npos) url += "/v1";
+    return url;
+}
+
 bool write_settings_json(const std::string& path, const Json& json)
 {
     const std::string dir = path.substr(0, path.find_last_of('/'));
@@ -225,13 +239,13 @@ Settings Settings::load()
     // apiKey 与全局端点只来自 env 与 settings.h 的默认值。先应用 env，
     // 让 settings.json 中未显式给 baseUrl 的自定义模型回退到实际端点。
     const std::string env_key = get_env_value("PI_API_KEY");
-    const std::string deepseek_key = get_env_value("DEEPSEEK_API_KEY");
     const std::string openai_key = get_env_value("OPENAI_API_KEY");
     if (!env_key.empty()) settings.apiKey = env_key;
-    if (settings.apiKey.empty() && !deepseek_key.empty()) settings.apiKey = deepseek_key;
     if (settings.apiKey.empty() && !openai_key.empty()) settings.apiKey = openai_key;
     const std::string env_base = get_env_value("PI_BASE_URL");
     if (!env_base.empty()) settings.baseUrl = env_base;
+    // 裸域名补 /v1（默认端点同样处理），自定义模型随后继承规范化后的默认端点
+    settings.baseUrl = normalize_base_url(settings.baseUrl);
     const std::string env_model = get_env_value("PI_MODEL");
 
     const std::string path = expand_home("~/.pi-cpp/settings.json");
@@ -262,6 +276,8 @@ Settings Settings::load()
                 try
                 {
                     ModelInfo m = model_from_json(item, settings.baseUrl);
+                    if (m.baseUrl.empty()) m.baseUrl = settings.baseUrl;
+                    m.baseUrl = normalize_base_url(m.baseUrl);
                     if (!m.id.empty()) settings.models.push_back(std::move(m));
                 }
                 catch (...)

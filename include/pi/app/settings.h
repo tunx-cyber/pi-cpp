@@ -15,7 +15,7 @@ namespace pi
 /** ~/.pi-cpp/settings.json（模型/thinking 按 cwd 持久化）。 */
 struct Settings
 {
-    /** 仅从 env 解析（PI_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY），不读 settings.json。 */
+    /** 仅从 env 解析（PI_API_KEY / OPENAI_API_KEY），不读 settings.json。 */
     std::string apiKey;
     /** 代码默认端点；可用 env PI_BASE_URL 覆盖，不读 settings.json。 */
     std::string baseUrl = "https://api.deepseek.com";

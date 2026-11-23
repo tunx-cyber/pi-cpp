@@ -2,6 +2,20 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式（无版本号，按日期记录）。
 
+## 2026-11-23（一）换端点后自动重选模型 + baseUrl 规范化
+
+### 修复
+
+- **换了 `.env` 的 baseUrl/key 后模型仍是旧的**：`ensure_model()` 原来在“已有模型”时直接返回，端点 `GET /models` 从不被查询，配置里持久化的 `deepseek-flash` 就一直生效。现在每次启动都校验一次：配置的模型仍在端点列表里才保留，否则改用端点里的模型并打印一行提示（“配置的模型 X 不在端点 … 的模型列表中，已改用 Y”）。
+- **裸域名端点 404**：`PI_BASE_URL=https://api.xiaomimimo.com` 这种没有 `/v1` 的地址会让 `/models`、`/chat/completions` 直接 404。`Settings::load()` 现在做端点规范化：去掉尾部斜杠，只有 `scheme://host[:port]`（无路径）时补 `/v1`；带路径的地址（`…/openai/v1`、`…/anthropic/v1`）原样保留。
+- **自动选模型选到语音模型**：端点常把 `*-asr` / `*-tts-*` / embedding 排在前面，导致默认模型不可对话（400）。自动选择时跳过这些条目，取第一个对话模型。
+- 交互模式启动行改为 `模型：<id>（<端点>）`，可以直接看出 `PI_BASE_URL` 的 shell 环境变量是否盖过了 `.env`。
+
+### 测试
+
+- 新增 `NormalizesBareBaseUrl`、`KeepsConfiguredModelWhenEndpointListsIt`、`NotifiesWhenConfiguredModelMissingFromEndpoint`、`KeepsConfiguredModelWhenEndpointIsUnavailable`、`SkipsNonChatModelsWhenPickingDefault`；全套 195 项：194 通过 + 1 跳过。
+- 真机验证：`.env` 指向 `https://api.xiaomimimo.com`（不带 /v1）+ 旧配置 `deepseek-flash` 时，启动即提示并切到 `mimo-v2.6-flash`，一次性对话正常返回。
+
 ## 2026-11-22（日）web_search 改用联网工具（deepseek_web_search）
 
 ### 变更

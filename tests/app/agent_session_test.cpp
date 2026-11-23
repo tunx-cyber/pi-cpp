@@ -147,9 +147,111 @@ TEST(AgentSessionModelsTest, ResolvesDefaultModelFromEndpoint)
     ASSERT_TRUE(session.ensure_model(&error)) << error;
     EXPECT_EQ(session.model().id, "model-a");
 
-    // 已有模型后不再请求端点
+    // 每次 ensure_model 都探测端点：模型仍在列表里就保留，且不产生切换提示
+    std::string notice;
+    ASSERT_TRUE(session.ensure_model(&error, &notice)) << error;
+    EXPECT_EQ(session.model().id, "model-a");
+    EXPECT_TRUE(notice.empty());
+    EXPECT_EQ(server.requests().size(), 2U);
+}
+
+TEST(AgentSessionModelsTest, SkipsNonChatModelsWhenPickingDefault)
+{
+    // 端点把语音/向量模型排在前面时，默认模型应选第一个对话模型
+    pi_test::FakeSseServer server;
+    server.set_handler(
+        [](const std::string&, const std::map<std::string, std::string>&)
+        {
+            return std::string(
+                R"({"object":"list","data":[{"id":"mimo-v2.5-asr"},{"id":"mimo-v2.5-tts"},)"
+                R"({"id":"Embed-V1"},{"id":"mimo-v2.6-flash"}]})");
+        });
+
+    Settings settings;
+    settings.baseUrl = server.base_url();
+    settings.apiKey = "test-key";
+    settings.sessionsRoot = "/tmp/pi-agent-session-test-sessions";
+    AgentSession session(settings, "/tmp/pi-agent-session-test-cwd-nonchat");
+    session.new_session();
+
+    std::string error;
     ASSERT_TRUE(session.ensure_model(&error)) << error;
-    EXPECT_EQ(server.requests().size(), 1U);
+    EXPECT_EQ(session.model().id, "mimo-v2.6-flash");
+}
+
+TEST(AgentSessionModelsTest, KeepsConfiguredModelWhenEndpointListsIt)
+{
+    // 换 baseUrl 后旧模型（deepseek-flash）不在新端点列表里：改用端点第一个模型并提示
+    pi_test::FakeSseServer server;
+    server.set_handler(
+        [](const std::string&, const std::map<std::string, std::string>&)
+        {
+            return std::string(
+                R"({"object":"list","data":[{"id":"mimo-v2.5"},{"id":"deepseek-flash"}]})");
+        });
+
+    Settings settings;
+    settings.baseUrl = server.base_url();
+    settings.apiKey = "test-key";
+    settings.model = "deepseek-flash";
+    settings.sessionsRoot = "/tmp/pi-agent-session-test-sessions";
+    AgentSession session(settings, "/tmp/pi-agent-session-test-cwd-switch");
+    session.new_session();
+    ASSERT_EQ(session.model().id, "deepseek-flash");
+
+    std::string error;
+    std::string notice;
+    ASSERT_TRUE(session.ensure_model(&error, &notice)) << error;
+    EXPECT_EQ(session.model().id, "deepseek-flash");  // 仍在列表里 → 保留
+    EXPECT_TRUE(notice.empty());
+}
+
+TEST(AgentSessionModelsTest, NotifiesWhenConfiguredModelMissingFromEndpoint)
+{
+    pi_test::FakeSseServer server;
+    server.set_handler(
+        [](const std::string&, const std::map<std::string, std::string>&) {
+            return std::string(
+                R"({"object":"list","data":[{"id":"mimo-v2.5"},{"id":"mimo-v2.5-pro"}]})");
+        });
+
+    Settings settings;
+    settings.baseUrl = server.base_url();
+    settings.apiKey = "test-key";
+    settings.model = "deepseek-flash";
+    settings.sessionsRoot = "/tmp/pi-agent-session-test-sessions";
+    AgentSession session(settings, "/tmp/pi-agent-session-test-cwd-missing");
+    session.new_session();
+
+    std::string error;
+    std::string notice;
+    ASSERT_TRUE(session.ensure_model(&error, &notice)) << error;
+    EXPECT_EQ(session.model().id, "mimo-v2.5");
+    EXPECT_NE(notice.find("deepseek-flash"), std::string::npos) << notice;
+    EXPECT_NE(notice.find("mimo-v2.5"), std::string::npos) << notice;
+}
+
+TEST(AgentSessionModelsTest, KeepsConfiguredModelWhenEndpointIsUnavailable)
+{
+    pi_test::FakeSseServer server;
+    server.set_handler([](const std::string&, const std::map<std::string, std::string>&)
+                       { return std::string(R"({"error":{"message":"service unavailable"}})"); });
+    server.set_status(503);
+
+    Settings settings;
+    settings.baseUrl = server.base_url();
+    settings.apiKey = "test-key";
+    settings.model = "model-a";
+    settings.sessionsRoot = "/tmp/pi-agent-session-test-sessions";
+    AgentSession session(settings, "/tmp/pi-agent-session-test-cwd-offline");
+    session.new_session();
+
+    std::string error;
+    std::string notice;
+    EXPECT_TRUE(session.ensure_model(&error, &notice));
+    EXPECT_TRUE(error.empty());
+    EXPECT_TRUE(notice.empty());
+    EXPECT_EQ(session.model().id, "model-a");
 }
 
 TEST(AgentSessionModelsTest, EnsureModelReportsEndpointFailure)

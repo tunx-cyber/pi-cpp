@@ -38,6 +38,8 @@ echo "hello" | ./build/picpp
 
 ### API key 配置
 
+`PI_BASE_URL` 只写裸域名（如 `https://api.xiaomimimo.com`）也可以：加载时会自动补 `/v1`，带路径的地址原样使用。启动时会向端点 `GET /models` 校验配置的模型，换了端点和 key 后旧模型不存在时会自动切到端点里的第一个对话模型并提示。
+
 API key 按以下优先级自动解析（`src/app/settings.cpp` 的 `Settings::load()`）：
 
 | 优先级 | 来源 |

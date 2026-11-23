@@ -48,7 +48,14 @@ class AgentSession
      * 失败时返回 false 并写入 errorOut（端点不可达 / 未返回任何模型）。
      * 前置条件：会话已创建或恢复（需要向会话写入模型切换记录）。
      */
-    bool ensure_model(std::string* errorOut = nullptr);
+    /**
+     * 确定当前模型：总是向端点 `GET /models` 探测一次。
+     * - 已配置模型出现在端点列表中 → 保留；
+     * - 不在列表里（换了 baseUrl、或旧会话记录的模型）→ 改用端点第一个模型，
+     *   提示写入 noticeOut（只改进程内状态，不落盘）；
+     * - 端点不可用 → 沿用已配置模型，只有连一个模型都没有时才失败。
+     */
+    bool ensure_model(std::string* errorOut = nullptr, std::string* noticeOut = nullptr);
     /** 切换 thinking（按 cwd 持久化）。 */
     void set_thinking(ThinkingLevel level);
     bool compact(std::string* errorOut = nullptr);
